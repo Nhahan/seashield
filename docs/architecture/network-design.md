@@ -88,7 +88,8 @@ class EventLoop {
 | **readiness 기반** (준비되면 알림 → 호출자가 read/write) | kqueue/epoll의 공통 모델. completion 기반(IOCP)과의 경계는 §4.4 |
 | **레벨 트리거(LT)** | 정확성 우선: 한 번에 다 읽지 못해도 다음 루프에서 재통지 → "읽다 만 데이터" 버그 부재. ET는 EAGAIN까지 드레인 강제 + 기아 관리가 필요해 복잡도 대비 이득이 이 규모에선 없음. ET 전환은 성능 측정 후 결정할 확장 항목 |
 | **WRITE 관심은 송신 잔량이 있을 때만 등록** | LT에서 WRITE를 상시 등록하면 소켓 버퍼가 빈 동안 매 루프 깨어나는 busy-loop 발생. `SendQueue`가 비면 즉시 해제 (§6.2) |
-| **콜백 디스패치 시 매번 fd 재조회** | 한 배치(batch) 안에서 앞선 콜백이 뒤의 fd를 close/remove할 수 있음 → 디스패치 직전에 등록 테이블을 재조회해 이미 제거된 fd는 건너뜀 |
+| **콜백 디스패치 시 fd 재조회 + 세대 토큰(generation) 검증** | 한 배치 안에서 앞선 콜백이 뒤의 fd를 close/remove할 수 있음 → 테이블 재조회로 제거된 fd는 건너뜀. 단, 재조회만으로는 부족: **fd 번호는 close 직후 즉시 재사용**되므로(같은 배치에서 close + accept면 같은 번호) 옛 등록의 이벤트가 새 세션에 배달될 수 있다(silent cross-session delivery). 등록 시 세대 번호를 kqueue `udata` / epoll `data.u64`에 실어 보내고, 디스패치 시 테이블의 현재 세대와 일치할 때만 콜백을 호출한다 |
+| **EINTR → 0 반환** | 시그널로 깨어난 것은 오류가 아님 — 호출자 루프의 다음 반복이 자연스러운 재시도 |
 | **`run_once` 단위 노출 (run 루프를 내장하지 않음)** | 호출자(서버 메인)가 틱 사이에 세션 정리·종료 플래그 검사 등을 끼워 넣을 수 있어야 함 (§6.3 지연 삭제) |
 
 ---
@@ -115,6 +116,8 @@ kqueue에서 "READ만 → READ+WRITE"는 WRITE 필터의 EV_ADD 1건이지만, "
 - 용도: 다른 스레드(P2의 시뮬레이션 스레드, 종료 신호 등)가 `run_once` 블록을 즉시 깨움.
 - 보장: `wakeup()`만 스레드 안전. 그 외 메서드를 I/O 스레드 밖에서 부르는 것은 규약 위반 (디버그 빌드에서 스레드 ID 검증 — §7).
 - 합치기(coalescing): 연속 wakeup은 1회 통지로 합쳐질 수 있음 — "깨어난다"만 보장하며 횟수는 보장하지 않는다.
+- **누락 없는 wakeup 규약**: 생산자는 "데이터를 큐에 push한 뒤 wakeup" 순서를 지키고, 소비자는 깨어난 뒤 큐를 끝까지 드레인한다 — 합쳐짐이 있어도 push가 통지보다 먼저이므로 유실 불가. 드레인 메커니즘: epoll은 eventfd를 read해 카운터를 0으로 리셋, kqueue는 EV_CLEAR 등록으로 전달 즉시 자동 리셋.
+- **kError/kHangup도 힌트다**: 오류·행업 비트만 도착해도 종료 판정은 수신 경로로 합류시켜 `read()`의 0/오류 반환으로 확정한다(§4.1 EOF 철학의 확장). kError 시 `getsockopt(SO_ERROR)`로 원인을 로깅.
 
 ### 4.4 IOCP 수용 가능성 (설계 여지만)
 
@@ -131,7 +134,8 @@ IOCP는 "준비됨"이 아니라 "**완료됨**(버퍼에 이미 수신됨)"을 
 ```
 
 - **길이 프리픽스 선택 근거**: 구분자(delimiter) 방식은 바이너리 페이로드와 충돌하고 스캔 비용이 있다. 길이 프리픽스는 O(1) 경계 판정.
-- `length == 0` 또는 `> 16KB`는 **프로토콜 위반 → 즉시 절단**. 상한이 없으면 악의적/버그 클라이언트가 65KB 헤더로 메모리를 강제한다 (P3 패킷 설계의 ~1200B UDP 상한과 별개로, TCP 제어 채널의 자체 상한).
+- `length == 0` 또는 `> 16KB`는 **프로토콜 위반 → 즉시 절단**. uint16 필드의 이론상 최대는 65535이지만 16KiB는 **정책 상한**이다 — 제어 채널 메시지에 충분하면서 수신 측 메모리 상한을 보장하는 값(P3 패킷 설계의 ~1200B UDP 상한과 별개인 TCP 제어 채널의 자체 상한).
+- **ingress 백프레셔(내재적 유계)**: 파서는 완성 프레임을 즉시 배출하므로 수신 누적 버퍼는 구조적으로 `헤더(2B) + 16KiB` 미만을 유지 — 인바운드 방향의 메모리 상한이 설계로 보장된다. 단, **미완성 프레임을 들고 무한정 버티는 유휴 연결(slow-loris류)** 의 차단은 타임아웃이 필요하며, 이는 P3 keepalive와 함께 도입한다(P1 비목표로 명시).
 
 ### 5.2 FrameParser (순수 클래스)
 
@@ -156,7 +160,7 @@ class FrameParser {
 ```
 on kRead:
   loop:
-    n = read(fd, buf, 4096)
+    n = read(fd, buf, 16KiB)        // 최대 프레임 크기와 정합 — 큰 프레임도 적은 시스템콜로
     n > 0  → parser.feed(...)  (false → close("protocol violation"))
     n == 0 → close("peer closed")                    // EOF의 최종 권위
     n < 0  → EINTR → continue / EAGAIN → break / 그 외 → close("read error")
@@ -207,10 +211,11 @@ on kWrite:
 ### 6.4 세션 수명주기
 
 ```
-[Accepted] ── start() ──▶ ACTIVE ── close(reason) ──▶ CLOSED ── (owner가 지연 삭제)
+CONNECTING (accept 직후) ──▶ ACTIVE ── close(reason) ──▶ DISCONNECTED ── (owner가 지연 삭제)
 ```
 
-- P1은 HANDSHAKE 없이 즉시 ACTIVE (역할 협상은 P3 프로토콜에서 상태 추가).
+- 기획서 §4.8의 상태머신(`CONNECTING → HANDSHAKE → ACTIVE → DISCONNECTED`)에서 **P1은 HANDSHAKE를 생략한 부분집합** — 역할 협상이 P3 프로토콜 소관이므로 상태 이름만 예약해 둔다.
+- **재접속 복귀의 구조적 요구(P3 예고)**: 기획서 §4.8의 "세션 토큰으로 재접속 시 역할 복귀"는 transport 세션(이 문서의 수명주기)보다 **오래 살아남는 세션 예약 테이블**이 필요하다 — 즉 P3의 논리 세션과 P1의 transport 세션은 수명이 다른 별개 객체임을 지금 명시해 둔다.
 - `close()`는 멱등: 최초 1회만 fd 해제·루프 등록 해제·CloseHandler 통지.
 - **지연 삭제(deferred deletion)**: 콜백 스택 안에서 세션 객체를 delete하면 콜백 복귀 시 use-after-free. CloseHandler는 소유자(SessionManager)에 id만 통지하고, 소유자는 `run_once` 반환 후 일괄 삭제한다.
 
@@ -222,6 +227,7 @@ on kWrite:
 - 외부 스레드에 허용된 것은 `EventLoop::wakeup()` 뿐.
 - 디버그 빌드에서 생성 스레드 ID를 기록하고 메서드 진입 시 assert — 규약을 기계적으로 검증.
 - 확장 경로 (기획서 §4.6): P2에서 시뮬레이션 스레드 추가 시 통신은 SPSC 큐 + wakeup. I/O 스레드 증설 시(SO_REUSEPORT) 수신 큐를 Vyukov MPSC로 전환.
+- **G4(격리) 논증의 범위**: P1에서는 단일 스레드 + 세션별 송신 큐로 성립한다. P2에서 시뮬→I/O SPSC 경계가 생겨도, 스냅샷은 SPSC에서 pop한 뒤 **세션별 송신 큐로 복제·분배**되므로 정체된 세션이 공유 큐를 역류시킬 수 없는 구조를 설계 불변식으로 유지한다 — "느린 클라이언트 격리"는 스레드 토폴로지가 바뀌어도 깨지지 않는 속성으로 정의.
 
 ---
 
@@ -230,9 +236,12 @@ on kWrite:
 | 항목 | 규칙 |
 |---|---|
 | SIGPIPE | 프로세스 전역 `SIG_IGN` + macOS는 소켓별 `SO_NOSIGPIPE`, Linux는 `send(MSG_NOSIGNAL)` 이중 방어 |
-| non-blocking | 모든 소켓. macOS는 accept 직후 `fcntl(O_NONBLOCK, FD_CLOEXEC)` (accept4 없음), Linux는 `accept4(SOCK_NONBLOCK\|SOCK_CLOEXEC)` |
-| EINTR | 모든 시스템콜 재시도 래퍼 경유 |
-| accept 루프 | EAGAIN까지 드레인. `EMFILE`(fd 고갈) 시 해당 연결만 거절하고 서버는 지속 |
+| non-blocking + CLOEXEC | 모든 소켓. macOS는 accept 직후 **fcntl 2회** — `O_NONBLOCK`은 파일 *상태* 플래그(`F_GETFL`/`F_SETFL` read-modify-write), `FD_CLOEXEC`는 *디스크립터* 플래그(`F_SETFD`)로 **서로 다른 플래그 공간이라 한 호출로 합칠 수 없음**. Linux는 `accept4(SOCK_NONBLOCK\|SOCK_CLOEXEC)`로 원자적 — 비원자 macOS 경로와의 비대칭은 의도된 플랫폼 차이로 명시 |
+| EINTR | 모든 시스템콜 재시도 래퍼 경유. `run_once`의 대기 시스템콜은 EINTR 시 0 반환(호출자 루프가 자연 재시도) |
+| accept 루프 | EAGAIN까지 드레인. `EMFILE`/`ENFILE`(fd 고갈) 시 단순 "거절 후 지속"은 **LT에서 리스너가 계속 readable로 남아 100% CPU 스핀** — 리스너의 READ 관심을 일시 해제(pause)하고, 세션이 닫혀 fd가 확보되면 재무장(resume)하는 방식으로 회피 |
+| 수용 한도 (admission control) | 동시 세션 상한(`--max-clients`, 기본 64) 초과 시 accept 직후 즉시 close — fd 고갈에 도달하기 전 단계의 1차 방어선 |
+| 종료 의미론 | 정상 종료는 송신 큐 드레인 후 close(FIN). **강제 절단**(송신 큐 초과·프로토콜 위반)은 미송신 데이터를 버리고 즉시 close — 수신 미처리 데이터가 남아 있으면 커널이 RST를 보낼 수 있으나, "회복 불가능한 클라이언트에게 오래된 데이터를 끝까지 보내주지 않는다"는 §6.3 정책과 일치하는 의도된 동작 |
+| 클라이언트 connect 경로 | P1의 도구/테스트 클라이언트는 **블로킹 소켓**(이벤트 루프 비참여) — non-blocking connect(`EINPROGRESS` → kWrite → `SO_ERROR` 확인) 경로는 서버가 아웃바운드 연결을 만들지 않으므로 P1 비목표로 명시 |
 | listen | `SO_REUSEADDR`(TIME_WAIT 재바인드), backlog 128 |
 | fd 소유권 | 전 구간 `UniqueFd`(RAII) — 누수·이중 close 원천 제거 |
 | UDP | recvfrom EAGAIN까지 드레인. sendto가 EAGAIN이면 **드롭+카운트** (UDP 의미론상 재시도 무가치, 통계는 관측성용) |
@@ -245,7 +254,7 @@ on kWrite:
 |---|---|---|
 | **Boost.Asio** | 검증된 크로스플랫폼 Proactor 모사, 코루틴 지원 | OS 레벨 I/O 멀티플렉싱을 직접 다뤄본 경험이 포트폴리오의 핵심 목적. 의존성 0 원칙(기획서 §8). 실무 신규 프로젝트라면 1순위 검토 대상임을 인지 |
 | **libuv / libevent** | 가볍고 성숙 | C API 래핑 비용 + 동일한 학습 목적 상실 |
-| **select/poll 직접** | 가장 단순 | O(n) 스캔, fd 1024 제한(select) — epoll/kqueue가 존재하는 이유 자체가 어필 포인트 |
+| **select/poll 직접** | 가장 단순 | select는 `FD_SETSIZE`(통상 1024) 제한 + 매 호출 O(n), poll은 fd 수 제한은 없으나 역시 매 호출 O(n) 전달·스캔 — epoll/kqueue가 존재하는 이유 자체가 어필 포인트 |
 | **스레드-퍼-커넥션 + blocking I/O** | 코드 단순 | 클라이언트 수만큼 스레드 — 이 규모(≤8)에선 사실 동작함. 그러나 시뮬레이션 틱과의 결합(P2)에서 이벤트 루프가 구조적으로 우월하고, 확장성 논증이 면접 단골 |
 
 ---
@@ -256,7 +265,7 @@ on kWrite:
 |---|---|---|
 | 단위 (순수) | FrameParser | 바이트 분할 테이블 테스트: 0.5개/1.5개/N개/1바이트씩/최대길이/위반(0, >16KB) |
 | 단위 (순수) | SendQueue | 주입 writer로 partial write·would-block·상한 초과 결정적 재현 |
-| 단위 (OS) | EventLoop | pipe 쌍으로 kRead 통지, 별도 스레드에서 wakeup → run_once 즉시 복귀, 타임아웃 0 반환 |
+| 단위 (OS) | EventLoop | pipe 쌍으로 kRead 통지, 별도 스레드에서 wakeup → run_once 즉시 복귀, 타임아웃 0 반환, **같은 배치 내 fd close→재사용 시 옛 이벤트가 새 등록에 배달되지 않음(세대 토큰 검증)** |
 | 통합 | Acceptor+TcpSession+UDP | 루프백 실소켓: 에코 round-trip(한 write에 2.5프레임), 느린 클라이언트(수신 정지) → 큐 상한 절단 확인, UDP 에코 |
 | 비기능 | 전 계층 | CI에서 ASan/UBSan/TSan 매트릭스 (kqueue: macOS 러너, epoll: Linux 러너 + 로컬 Docker) |
 
