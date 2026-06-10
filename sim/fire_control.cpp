@@ -12,8 +12,11 @@ constexpr math::Vec3 kLaunchPosition{0.0, 0.0, 2.0};
 constexpr double kMinElevation = math::deg_to_rad(0.5);
 constexpr double kMaxElevation = math::deg_to_rad(80.0);
 constexpr double kConvergedMissM = 1.0;
-constexpr int kMaxOuterIterations = 8;    // PIP time fixed-point.
-constexpr int kMaxNewtonIterations = 15;  // (az, el) shooting per aim point.
+// PIP time fixed-point tolerance. The tolerance leaks into the miss distance
+// scaled by the closing speed (~500 m/s), so 5 ms keeps it under ~3 m.
+constexpr double kConvergedTimeS = 0.005;
+constexpr int kMaxOuterIterations = 20;    // PIP time fixed-point.
+constexpr int kMaxNewtonIterations = 15;   // (az, el) shooting per aim point.
 }  // namespace
 
 FireControlSolver::FireControlSolver(const Weather& weather, const RocketParams& rocket)
@@ -62,14 +65,25 @@ std::optional<FiringSolution> FireControlSolver::solve(const math::Vec3& target_
                                                        const math::Vec3& target_velocity) const {
   // Initial time-of-flight guess from an average ballistic speed.
   double time_of_flight = target_position.norm() / 450.0;
-  double az = math::atan2(target_position.x, target_position.y);
-  double el = math::deg_to_rad(15.0);
+  double az = 0.0;
+  double el = 0.0;
   int probes = 0;
 
   Probe last{};
+  bool converged = false;
   for (int outer = 0; outer < kMaxOuterIterations; ++outer) {
     // Predicted intercept point: constant-velocity target extrapolation.
     const math::Vec3 aim = target_position + target_velocity * time_of_flight;
+
+    // Re-initialize on the DIRECT (minimum-time) arc every outer iteration.
+    // Warm-starting across iterations can creep onto the lofted branch, whose
+    // long flight time blows up the prediction lead and makes the PIP
+    // fixed-point oscillate instead of converge.
+    az = math::atan2(aim.x, aim.y);
+    const double ground_range = math::sqrt(aim.x * aim.x + aim.y * aim.y);
+    el = std::clamp(math::atan2(aim.z - kLaunchPosition.z, ground_range) +
+                        math::deg_to_rad(8.0),
+                    kMinElevation, math::deg_to_rad(45.0));
 
     // 2D Newton (finite-difference Jacobian) on the miss components
     // perpendicular to the line of sight: crosswind axis and vertical axis.
@@ -111,24 +125,33 @@ std::optional<FiringSolution> FireControlSolver::solve(const math::Vec3& target_
       el = std::clamp(el + del, kMinElevation, kMaxElevation);
     }
 
-    const double new_time = last.time_s;
-    if (new_time <= 0.0) {
+    if (last.time_s <= 0.0) {
       return std::nullopt;
     }
-    const double dt = new_time - time_of_flight;
-    time_of_flight = new_time;
-    if (dt * dt < 1e-6 && last.miss_m < kConvergedMissM) {
-      break;  // PIP time fixed-point converged.
+    // Damped fixed-point on the flight time. The aim point of a closing
+    // target moves with the assumed time, so the undamped update can
+    // oscillate; damping by half converges for |dτ/dt| < 3.
+    const double residual = last.time_s - time_of_flight;
+    if (math::sqrt(residual * residual) < kConvergedTimeS &&
+        last.miss_m < kConvergedMissM) {
+      converged = true;
+      break;
+    }
+    time_of_flight += 0.5 * residual;
+    if (time_of_flight <= 0.2) {
+      return std::nullopt;
     }
   }
 
-  if (last.miss_m > 50.0) {
-    return std::nullopt;  // Out of reach for this rocket.
+  // A solution that did not converge is not a solution — returning the last
+  // probe would hand the operator a self-inconsistent firing angle.
+  if (!converged || last.miss_m > 50.0) {
+    return std::nullopt;
   }
   FiringSolution solution;
   solution.azimuth_rad = az;
   solution.elevation_rad = el;
-  solution.time_of_flight_s = time_of_flight;
+  solution.time_of_flight_s = last.time_s;
   solution.predicted_miss_m = last.miss_m;
   solution.probe_count = probes;
   return solution;

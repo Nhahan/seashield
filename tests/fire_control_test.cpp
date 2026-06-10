@@ -101,6 +101,30 @@ TEST(FireControlTest, TurningTargetBreaksConstantVelocityPrediction) {
   EXPECT_GT(miss, 30.0);
 }
 
+// Regression: a target closing on the launcher makes the PIP fixed-point
+// oscillate if the solver drifts onto the lofted arc — it must stay on the
+// direct (minimum-time) arc and converge (demo scenario geometry).
+TEST(FireControlTest, ClosingTargetConvergesOnDirectArcAndHits) {
+  TargetParams closing;
+  closing.initial_position = {6000, 8000, 800};
+  closing.heading_rad = math::deg_to_rad(225.0);  // Straight at the ship.
+  closing.speed_mps = 250.0;
+  closing.turn_rate_rad_s = 0.0;
+
+  const Target probe(closing);
+  const auto solution = FireControlSolver(calm_weather(), RocketParams{})
+                            .solve(closing.initial_position, probe.velocity());
+  ASSERT_TRUE(solution.has_value());
+  // Direct arc for this geometry is ~18s; the oscillating lofted branch the
+  // solver must avoid sits at 25s+.
+  EXPECT_LT(solution->time_of_flight_s, 22.0);
+
+  bool detonated = false;
+  const double miss = closed_loop_miss(calm_weather(), closing, &detonated);
+  EXPECT_TRUE(detonated);
+  EXPECT_LT(miss, 12.0);
+}
+
 TEST(FireControlTest, UnreachableTargetReturnsNoSolution) {
   const FireControlSolver solver(calm_weather(), RocketParams{});
   EXPECT_FALSE(solver.solve({40000, 0, 9000}, {0, 0, 0}).has_value());
