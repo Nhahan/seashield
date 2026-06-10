@@ -37,6 +37,10 @@ add_library(seashield_core STATIC
   core/logger.cpp
   sim/ballistics.cpp
   sim/environment.cpp
+  sim/fire_control.cpp
+  sim/journal.cpp
+  sim/scenario.cpp
+  sim/world.cpp
   net/acceptor.cpp
   net/event_loop.cpp
   net/frame_parser.cpp
@@ -66,16 +70,20 @@ if(SEASHIELD_BUILD_TESTS)
   enable_testing()
   add_executable(seashield_tests
     tests/ballistics_test.cpp
+    tests/determinism_test.cpp
     tests/engagement_test.cpp
     tests/environment_test.cpp
+    tests/fire_control_test.cpp
     tests/event_loop_test.cpp
     tests/frame_parser_test.cpp
     tests/integration_test.cpp
     tests/math_test.cpp
     tests/pcg32_test.cpp
+    tests/scenario_test.cpp
     tests/send_queue_test.cpp
     tests/target_test.cpp
     tests/unique_fd_test.cpp
+    tests/world_test.cpp
   )
   target_link_libraries(seashield_tests PRIVATE seashield_core GTest::gtest_main)
   target_compile_definitions(seashield_tests
