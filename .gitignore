@@ -1,0 +1,18 @@
+# Build directories
+build/
+build-*/
+cmake-build-*/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+
+# macOS
+.DS_Store
+
+# Compiled artifacts
+*.o
+*.a
+*.dylib
+*.so
