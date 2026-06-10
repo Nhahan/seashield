@@ -14,6 +14,10 @@ add_compile_options(-Wall -Wextra -Wpedantic)
 # Determinism: forbid FMA contraction so the simulation produces identical
 # bit patterns across optimization levels of the same toolchain (charter §5.1).
 add_compile_options(-ffp-contract=off)
+# Determinism: at -O1+ the compiler fuses same-argument sin/cos pairs into a
+# combined sincos call whose results can differ from the separate libm calls
+# by 1 ulp — enough to fork the state-hash regression between build types.
+add_compile_options(-fno-builtin-sin -fno-builtin-cos)
 
 if(SEASHIELD_SANITIZE STREQUAL "address")
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
