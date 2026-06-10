@@ -58,6 +58,9 @@ target_link_libraries(seashield_server PRIVATE seashield_core)
 add_executable(loadclient tools/loadclient.cpp)
 target_link_libraries(loadclient PRIVATE seashield_core)
 
+add_executable(ballistic_sandbox tools/ballistic_sandbox/main.cpp)
+target_link_libraries(ballistic_sandbox PRIVATE seashield_core)
+
 if(SEASHIELD_BUILD_TESTS)
   include(FetchContent)
   FetchContent_Declare(

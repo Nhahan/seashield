@@ -1,0 +1,11 @@
+# 교차 침투하는 아음속 대함미사일 — 기본 데모 시나리오
+weather_seed = 42
+sim_seed = 7
+gust_seed = 9
+duration_s = 60
+
+target_x = 6000
+target_y = 8000
+target_z = 800
+target_heading_deg = 225
+target_speed = 250
