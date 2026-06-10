@@ -30,7 +30,12 @@ KqueueEventLoop::KqueueEventLoop() : kq_(::kqueue()) {
   }
 }
 
-bool KqueueEventLoop::apply_interest(int fd, unsigned prev, unsigned next) {
+bool KqueueEventLoop::apply_interest(int fd, unsigned prev, unsigned next,
+                                     std::uint64_t generation) {
+  // The generation rides in udata and comes back with each event, so dispatch
+  // can detect events that belong to a previous registration of a reused fd
+  // number (design doc §3.1).
+  void* const udata = reinterpret_cast<void*>(static_cast<uintptr_t>(generation));
   struct kevent changes[2];
   int change_count = 0;
   const bool had_read = (prev & IoEvents::kRead) != 0;
@@ -39,12 +44,11 @@ bool KqueueEventLoop::apply_interest(int fd, unsigned prev, unsigned next) {
   const bool want_write = (next & IoEvents::kWrite) != 0;
 
   if (want_read != had_read) {
-    EV_SET(&changes[change_count++], fd, EVFILT_READ, want_read ? EV_ADD : EV_DELETE, 0, 0,
-           nullptr);
+    EV_SET(&changes[change_count++], fd, EVFILT_READ, want_read ? EV_ADD : EV_DELETE, 0, 0, udata);
   }
   if (want_write != had_write) {
     EV_SET(&changes[change_count++], fd, EVFILT_WRITE, want_write ? EV_ADD : EV_DELETE, 0, 0,
-           nullptr);
+           udata);
   }
   if (change_count == 0) {
     return true;
@@ -60,10 +64,11 @@ bool KqueueEventLoop::add(int fd, unsigned interest, IoCallback callback) {
   if (!valid() || fd < 0 || entries_.count(fd) != 0) {
     return false;
   }
-  if (!apply_interest(fd, 0, interest)) {
+  const std::uint64_t generation = next_generation_++;
+  if (!apply_interest(fd, 0, interest, generation)) {
     return false;
   }
-  entries_[fd] = Entry{interest, std::move(callback)};
+  entries_[fd] = Entry{interest, generation, std::move(callback)};
   return true;
 }
 
@@ -72,7 +77,7 @@ bool KqueueEventLoop::modify(int fd, unsigned interest) {
   if (it == entries_.end()) {
     return false;
   }
-  if (!apply_interest(fd, it->second.interest, interest)) {
+  if (!apply_interest(fd, it->second.interest, interest, it->second.generation)) {
     return false;
   }
   it->second.interest = interest;
@@ -84,7 +89,7 @@ bool KqueueEventLoop::remove(int fd) {
   if (it == entries_.end()) {
     return false;
   }
-  apply_interest(fd, it->second.interest, 0);
+  apply_interest(fd, it->second.interest, 0, it->second.generation);
   entries_.erase(it);
   return true;
 }
@@ -134,6 +139,13 @@ int KqueueEventLoop::run_once(int timeout_ms) {
     const int fd = static_cast<int>(ev.ident);
     auto it = entries_.find(fd);
     if (it == entries_.end()) {
+      continue;
+    }
+    // Generation check: fd numbers are reused immediately after close, so an
+    // event captured for a previous registration must not reach the entry
+    // that now occupies the same fd number.
+    const auto generation = static_cast<std::uint64_t>(reinterpret_cast<uintptr_t>(ev.udata));
+    if (generation != it->second.generation) {
       continue;
     }
     // Copy so the std::function survives self-removal from within the call.

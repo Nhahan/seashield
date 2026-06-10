@@ -29,6 +29,13 @@ uint32_t to_epoll_mask(unsigned interest) {
   return mask;
 }
 
+// The generation rides in data.u64 (high 32 bits) next to the fd (low 32
+// bits), so dispatch can detect events that belong to a previous registration
+// of a reused fd number (design doc §3.1).
+uint64_t pack_token(int fd, uint32_t generation) {
+  return (static_cast<uint64_t>(generation) << 32) | static_cast<uint32_t>(fd);
+}
+
 }  // namespace
 
 EpollEventLoop::EpollEventLoop()
@@ -41,7 +48,7 @@ EpollEventLoop::EpollEventLoop()
   }
   struct epoll_event ev {};
   ev.events = EPOLLIN;
-  ev.data.fd = wake_.get();
+  ev.data.u64 = pack_token(wake_.get(), 0);
   if (::epoll_ctl(epoll_.get(), EPOLL_CTL_ADD, wake_.get(), &ev) < 0) {
     SS_LOG_ERROR("registering wakeup eventfd failed: errno=%d", errno);
     epoll_.reset();
@@ -49,18 +56,26 @@ EpollEventLoop::EpollEventLoop()
   }
 }
 
+bool EpollEventLoop::apply(int op, int fd, unsigned interest, std::uint32_t generation) {
+  struct epoll_event ev {};
+  ev.events = to_epoll_mask(interest);
+  ev.data.u64 = pack_token(fd, generation);
+  if (::epoll_ctl(epoll_.get(), op, fd, &ev) < 0) {
+    SS_LOG_ERROR("epoll_ctl(op=%d) failed: fd=%d errno=%d", op, fd, errno);
+    return false;
+  }
+  return true;
+}
+
 bool EpollEventLoop::add(int fd, unsigned interest, IoCallback callback) {
   if (!valid() || fd < 0 || entries_.count(fd) != 0) {
     return false;
   }
-  struct epoll_event ev {};
-  ev.events = to_epoll_mask(interest);
-  ev.data.fd = fd;
-  if (::epoll_ctl(epoll_.get(), EPOLL_CTL_ADD, fd, &ev) < 0) {
-    SS_LOG_ERROR("epoll add failed: fd=%d errno=%d", fd, errno);
+  const std::uint32_t generation = next_generation_++;
+  if (!apply(EPOLL_CTL_ADD, fd, interest, generation)) {
     return false;
   }
-  entries_[fd] = Entry{interest, std::move(callback)};
+  entries_[fd] = Entry{interest, generation, std::move(callback)};
   return true;
 }
 
@@ -69,11 +84,7 @@ bool EpollEventLoop::modify(int fd, unsigned interest) {
   if (it == entries_.end()) {
     return false;
   }
-  struct epoll_event ev {};
-  ev.events = to_epoll_mask(interest);
-  ev.data.fd = fd;
-  if (::epoll_ctl(epoll_.get(), EPOLL_CTL_MOD, fd, &ev) < 0) {
-    SS_LOG_ERROR("epoll modify failed: fd=%d errno=%d", fd, errno);
+  if (!apply(EPOLL_CTL_MOD, fd, interest, it->second.generation)) {
     return false;
   }
   it->second.interest = interest;
@@ -105,7 +116,9 @@ int EpollEventLoop::run_once(int timeout_ms) {
   int dispatched = 0;
   for (int i = 0; i < ready; ++i) {
     const struct epoll_event& ev = events[i];
-    if (ev.data.fd == wake_.get()) {
+    const int fd = static_cast<int>(ev.data.u64 & 0xFFFFFFFFu);
+    const auto generation = static_cast<std::uint32_t>(ev.data.u64 >> 32);
+    if (fd == wake_.get()) {
       uint64_t value = 0;
       [[maybe_unused]] ssize_t n = ::read(wake_.get(), &value, sizeof(value));
       ++dispatched;
@@ -127,8 +140,14 @@ int EpollEventLoop::run_once(int timeout_ms) {
     }
 
     // Fresh lookup: an earlier callback in this batch may have removed fd.
-    auto it = entries_.find(ev.data.fd);
+    auto it = entries_.find(fd);
     if (it == entries_.end()) {
+      continue;
+    }
+    // Generation check: fd numbers are reused immediately after close, so an
+    // event captured for a previous registration must not reach the entry
+    // that now occupies the same fd number.
+    if (generation != it->second.generation) {
       continue;
     }
     // Copy so the std::function survives self-removal from within the call.

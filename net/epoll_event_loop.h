@@ -2,6 +2,7 @@
 
 #if defined(__linux__)
 
+#include <cstdint>
 #include <unordered_map>
 
 #include "core/unique_fd.h"
@@ -27,11 +28,15 @@ class EpollEventLoop final : public EventLoop {
  private:
   struct Entry {
     unsigned interest = 0;
+    std::uint32_t generation = 0;
     IoCallback callback;
   };
 
+  bool apply(int op, int fd, unsigned interest, std::uint32_t generation);
+
   UniqueFd epoll_;
   UniqueFd wake_;
+  std::uint32_t next_generation_ = 1;
   std::unordered_map<int, Entry> entries_;
 };
 

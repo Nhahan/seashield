@@ -2,6 +2,7 @@
 
 #if defined(__APPLE__) || defined(__FreeBSD__)
 
+#include <cstdint>
 #include <unordered_map>
 
 #include "core/unique_fd.h"
@@ -27,12 +28,14 @@ class KqueueEventLoop final : public EventLoop {
  private:
   struct Entry {
     unsigned interest = 0;
+    std::uint64_t generation = 0;
     IoCallback callback;
   };
 
-  bool apply_interest(int fd, unsigned prev, unsigned next);
+  bool apply_interest(int fd, unsigned prev, unsigned next, std::uint64_t generation);
 
   UniqueFd kq_;
+  std::uint64_t next_generation_ = 1;
   std::unordered_map<int, Entry> entries_;
 };
 

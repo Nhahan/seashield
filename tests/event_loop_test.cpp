@@ -106,6 +106,64 @@ TEST_F(EventLoopTest, DoubleAddIsRejected) {
   EXPECT_FALSE(loop_->add(read_end_.get(), IoEvents::kRead, [](unsigned) {}));
 }
 
+// Closing an fd and reopening one in the same dispatch batch reuses the fd
+// number (POSIX lowest-available guarantee). A stale event captured for the
+// old registration must not be delivered to the new one (design doc §3.1).
+TEST_F(EventLoopTest, StaleEventAfterFdReuseIsNotDelivered) {
+  int p[2] = {-1, -1};
+  int q[2] = {-1, -1};
+  ASSERT_EQ(::pipe(p), 0);
+  ASSERT_EQ(::pipe(q), 0);
+  const char byte = 'x';
+  ASSERT_EQ(::write(p[1], &byte, 1), 1);
+  ASSERT_EQ(::write(q[1], &byte, 1), 1);
+
+  int spurious = 0;
+  int closed_fd = -1;
+  int reused_read = -1;
+  int reused_write = -1;
+  bool stole = false;
+  auto make_stealer = [&](int other_read) {
+    return [&, other_read](unsigned) {
+      if (stole) {
+        return;
+      }
+      stole = true;
+      // Drop the *other* registration mid-batch and let a fresh pipe reuse
+      // its fd number. The other fd's already-captured event is now stale.
+      ASSERT_TRUE(loop_->remove(other_read));
+      ASSERT_EQ(::close(other_read), 0);
+      closed_fd = other_read;
+      int fresh[2] = {-1, -1};
+      ASSERT_EQ(::pipe(fresh), 0);
+      EXPECT_EQ(fresh[0], other_read);  // Lowest-available fd reuse.
+      reused_read = fresh[0];
+      reused_write = fresh[1];
+      // The fresh pipe has no data: a correct loop must never fire this.
+      ASSERT_TRUE(loop_->add(fresh[0], IoEvents::kRead, [&](unsigned) { ++spurious; }));
+    };
+  };
+  ASSERT_TRUE(loop_->add(p[0], IoEvents::kRead, make_stealer(q[0])));
+  ASSERT_TRUE(loop_->add(q[0], IoEvents::kRead, make_stealer(p[0])));
+
+  EXPECT_GE(loop_->run_once(1000), 1);
+  EXPECT_TRUE(stole);
+  EXPECT_EQ(spurious, 0);
+
+  const int surviving_read = (closed_fd == p[0]) ? q[0] : p[0];
+  loop_->remove(surviving_read);
+  if (reused_read >= 0) {
+    loop_->remove(reused_read);
+    ::close(reused_read);
+  }
+  if (reused_write >= 0) {
+    ::close(reused_write);
+  }
+  ::close(surviving_read);
+  ::close(p[1]);
+  ::close(q[1]);
+}
+
 TEST_F(EventLoopTest, WakeupUnblocksFromAnotherThread) {
   std::atomic<bool> woke{false};
   std::thread waker([&] {
