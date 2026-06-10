@@ -11,6 +11,9 @@ option(SEASHIELD_BUILD_TESTS "Build unit tests" ON)
 set(SEASHIELD_SANITIZE "" CACHE STRING "Sanitizer preset: address, thread, or empty")
 
 add_compile_options(-Wall -Wextra -Wpedantic)
+# Determinism: forbid FMA contraction so the simulation produces identical
+# bit patterns across optimization levels of the same toolchain (charter §5.1).
+add_compile_options(-ffp-contract=off)
 
 if(SEASHIELD_SANITIZE STREQUAL "address")
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
@@ -32,6 +35,7 @@ endif()
 
 add_library(seashield_core STATIC
   core/logger.cpp
+  sim/environment.cpp
   net/acceptor.cpp
   net/event_loop.cpp
   net/frame_parser.cpp
@@ -60,9 +64,12 @@ if(SEASHIELD_BUILD_TESTS)
 
   enable_testing()
   add_executable(seashield_tests
+    tests/environment_test.cpp
     tests/event_loop_test.cpp
     tests/frame_parser_test.cpp
     tests/integration_test.cpp
+    tests/math_test.cpp
+    tests/pcg32_test.cpp
     tests/send_queue_test.cpp
     tests/unique_fd_test.cpp
   )
