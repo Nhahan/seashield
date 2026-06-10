@@ -32,7 +32,13 @@ endif()
 
 add_library(seashield_core STATIC
   core/logger.cpp
+  net/acceptor.cpp
   net/event_loop.cpp
+  net/frame_parser.cpp
+  net/send_queue.cpp
+  net/socket_util.cpp
+  net/tcp_session.cpp
+  net/udp_endpoint.cpp
   ${SEASHIELD_EVENT_LOOP_BACKEND}
 )
 target_include_directories(seashield_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -49,6 +55,9 @@ if(SEASHIELD_BUILD_TESTS)
   enable_testing()
   add_executable(seashield_tests
     tests/event_loop_test.cpp
+    tests/frame_parser_test.cpp
+    tests/integration_test.cpp
+    tests/send_queue_test.cpp
     tests/unique_fd_test.cpp
   )
   target_link_libraries(seashield_tests PRIVATE seashield_core GTest::gtest_main)
