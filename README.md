@@ -1,4 +1,4 @@
-# Project SeaShield (가칭)
+# Project SeaShield
 
 [![CI](https://github.com/Nhahan/seashield/actions/workflows/ci.yml/badge.svg)](https://github.com/Nhahan/seashield/actions/workflows/ci.yml)
 
