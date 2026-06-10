@@ -32,7 +32,10 @@ class KeyValues {
       return fallback;
     }
     consumed_.insert({it->first, true});
-    return std::strtod(it->second.c_str(), nullptr);
+    char* end = nullptr;
+    const double value = std::strtod(it->second.c_str(), &end);
+    check_fully_parsed(key, it->second, end);
+    return value;
   }
 
   std::uint64_t get_u64(const std::string& key, std::uint64_t fallback) {
@@ -41,8 +44,14 @@ class KeyValues {
       return fallback;
     }
     consumed_.insert({it->first, true});
-    return std::strtoull(it->second.c_str(), nullptr, 10);
+    char* end = nullptr;
+    const std::uint64_t value = std::strtoull(it->second.c_str(), &end, 10);
+    check_fully_parsed(key, it->second, end);
+    return value;
   }
+
+  // First key whose value contained numeric garbage ("target_speed = abc").
+  const std::optional<std::string>& invalid_value_key() const { return invalid_value_key_; }
 
   // First key that was provided but never consumed (typo detection).
   std::optional<std::string> unconsumed_key() const {
@@ -55,8 +64,15 @@ class KeyValues {
   }
 
  private:
+  void check_fully_parsed(const std::string& key, const std::string& raw, const char* end) {
+    if (!invalid_value_key_.has_value() && (end == raw.c_str() || *end != '\0')) {
+      invalid_value_key_ = key;
+    }
+  }
+
   std::map<std::string, std::string> values_;
   std::map<std::string, bool> consumed_;
+  std::optional<std::string> invalid_value_key_;
 };
 
 }  // namespace
@@ -138,6 +154,9 @@ std::optional<Scenario> load_scenario_text(const std::string& text, std::string*
   cfg.rocket.proximity_fuze_radius_m =
       kv.get_double("rocket_fuze_radius", cfg.rocket.proximity_fuze_radius_m);
 
+  if (const auto& invalid = kv.invalid_value_key()) {
+    return fail("invalid numeric value for key '" + *invalid + "'");
+  }
   if (const auto unknown = kv.unconsumed_key()) {
     return fail("unknown key '" + *unknown + "'");
   }

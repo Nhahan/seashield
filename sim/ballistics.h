@@ -18,9 +18,11 @@ struct RocketParams {
   double proximity_fuze_radius_m = 12.0;
 };
 
-// Environment as seen by a projectile in flight. The gust vector is sampled
-// once per tick and held constant across RK4 substeps (documented
-// simplification: the OU process advances at tick rate).
+// Environment as seen by a projectile in flight. The mean wind is resolved
+// at the probe altitude of every RK4 substep, while the gust vector is
+// sampled once per tick and held constant across substeps — an intentional
+// asymmetry: the OU process advances at tick rate, so it has no defined
+// sub-tick values.
 struct FlightEnvironment {
   const Atmosphere* atmosphere = nullptr;  // nullptr = vacuum (tests).
   const WindField* wind = nullptr;         // nullptr = calm.

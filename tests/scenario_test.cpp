@@ -74,6 +74,14 @@ TEST(ScenarioTest, DuplicateKeyIsRejected) {
   EXPECT_NE(error.find("duplicate"), std::string::npos);
 }
 
+TEST(ScenarioTest, NumericGarbageIsRejected) {
+  std::string error;
+  EXPECT_FALSE(load_scenario_text("target_speed = abc\n", &error).has_value());
+  EXPECT_NE(error.find("target_speed"), std::string::npos);
+  EXPECT_FALSE(load_scenario_text("weather_seed = 12xyz\n", &error).has_value());
+  EXPECT_NE(error.find("weather_seed"), std::string::npos);
+}
+
 TEST(ScenarioTest, MalformedLineIsRejected) {
   std::string error;
   EXPECT_FALSE(load_scenario_text("just words\n", &error).has_value());

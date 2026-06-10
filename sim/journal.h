@@ -26,6 +26,9 @@ class Journal {
   const std::vector<JournalEntry>& entries() const { return entries_; }
 
   // Text form; doubles use %.17g so parse() round-trips bit-exactly.
+  // The line format is version-locked to this binary: field order and count
+  // are fixed, and a future format change must bump a version token rather
+  // than extend lines in place.
   std::string serialize() const;
   static std::optional<Journal> parse(const std::string& text);
 

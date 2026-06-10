@@ -19,7 +19,12 @@ double saturation_vapor_pressure_pa(double temp_c) {
 }  // namespace
 
 double Weather::surface_wind_speed() const {
-  return wind_layers.empty() ? 0.0 : wind_layers.front().velocity.norm();
+  // Lowest layer by altitude — does not rely on the (documented but not
+  // enforced) ascending-order invariant of wind_layers.
+  const auto lowest = std::min_element(
+      wind_layers.begin(), wind_layers.end(),
+      [](const WindLayer& a, const WindLayer& b) { return a.altitude_m < b.altitude_m; });
+  return lowest == wind_layers.end() ? 0.0 : lowest->velocity.norm();
 }
 
 std::string Weather::describe() const {
@@ -80,6 +85,9 @@ double Atmosphere::pressure_pa(double altitude_m) const {
 }
 
 double Atmosphere::density(double altitude_m) const {
+  // The 1 K floor is purely a numerical guard far outside the modeled
+  // envelope: with a standard lapse rate it is reached only at ~41 km, four
+  // times the scenario ceiling (charter §5.2).
   const double t_k = std::max(1.0, t0_k_ - lapse_k_per_m_ * altitude_m);
   const double p = pressure_pa(altitude_m);
   // Constant relative humidity with altitude — a deliberate simplification.
@@ -116,15 +124,17 @@ math::Vec3 WindField::wind_at(double altitude_m) const {
 }
 
 GustProcess::GustProcess(double sigma_target_mps, std::uint64_t seed)
-    // OU stationary std = sigma_ou / sqrt(2*theta)  =>  sigma_ou = target * sqrt(2/tau).
-    : sigma_ou_(sigma_target_mps * math::sqrt(2.0 / kTimeConstantS)), rng_(seed, /*stream=*/3) {}
+    : sigma_target_(sigma_target_mps), rng_(seed, /*stream=*/3) {}
 
 void GustProcess::step(double dt_s) {
-  const double theta = 1.0 / kTimeConstantS;
-  const double diffusion = sigma_ou_ * math::sqrt(dt_s);
-  gust_.x += -theta * gust_.x * dt_s + diffusion * rng_.gaussian(0, 1);
-  gust_.y += -theta * gust_.y * dt_s + diffusion * rng_.gaussian(0, 1);
-  gust_.z += -theta * gust_.z * dt_s + diffusion * kVerticalScale * rng_.gaussian(0, 1);
+  // Exact OU discretization: x' = x·e^(−dt/τ) + σ·√(1−e^(−2dt/τ))·N(0,1).
+  // Unlike Euler–Maruyama this is unbiased and its stationary statistics do
+  // not depend on the step size.
+  const double decay = math::exp(-dt_s / kTimeConstantS);
+  const double diffusion = sigma_target_ * math::sqrt(1.0 - decay * decay);
+  gust_.x = gust_.x * decay + diffusion * rng_.gaussian(0, 1);
+  gust_.y = gust_.y * decay + diffusion * rng_.gaussian(0, 1);
+  gust_.z = gust_.z * decay + diffusion * kVerticalScale * rng_.gaussian(0, 1);
 }
 
 Weather WeatherGenerator::generate(std::uint64_t weather_seed) {

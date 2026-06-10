@@ -81,7 +81,7 @@ class GustProcess {
   static constexpr double kTimeConstantS = 2.0;
   static constexpr double kVerticalScale = 0.3;
 
-  double sigma_ou_;
+  double sigma_target_;
   Pcg32 rng_;
   math::Vec3 gust_;
 };
