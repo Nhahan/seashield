@@ -43,6 +43,12 @@ add_library(seashield_core STATIC
 )
 target_include_directories(seashield_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
+add_executable(seashield_server server/main.cpp)
+target_link_libraries(seashield_server PRIVATE seashield_core)
+
+add_executable(loadclient tools/loadclient.cpp)
+target_link_libraries(loadclient PRIVATE seashield_core)
+
 if(SEASHIELD_BUILD_TESTS)
   include(FetchContent)
   FetchContent_Declare(
