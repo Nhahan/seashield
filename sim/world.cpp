@@ -1,15 +1,12 @@
 #include "sim/world.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 #include "sim/state_hash.h"
 
 namespace seashield::sim {
-
-namespace {
-constexpr math::Vec3 kLaunchPosition{0.0, 0.0, 2.0};  // Deck height above sea.
-}
 
 World::World(const WorldConfig& config)
     : config_(config),
@@ -60,9 +57,12 @@ void World::finish_rocket(Rocket& rocket, bool detonated, bool killed) {
 
 void World::step() {
   // (1) Consume queued commands: expand salvos into scheduled launches.
+  // Scheduled ticks are always >= the current tick by construction (i >= 0),
+  // and sub-tick launch intervals quantize UP to one tick — the scheduler
+  // cannot fire twice within a tick (documented quantization).
   for (const FireCommand& cmd : pending_) {
     const auto interval_ticks = static_cast<std::uint64_t>(
-        std::max(1.0, cmd.launch_interval_s * kTickRateHz));
+        std::max<long long>(1, std::llround(cmd.launch_interval_s * kTickRateHz)));
     for (int i = 0; i < cmd.salvo_count; ++i) {
       scheduled_.push_back({tick_ + static_cast<std::uint64_t>(i) * interval_ticks,
                             cmd.azimuth_rad, cmd.elevation_rad, cmd.dispersion_mrad});
@@ -140,7 +140,26 @@ std::uint64_t World::state_hash() const {
   hasher.mix(tick_);
   hasher.mix(target_.position());
   hasher.mix(target_.heading_rad());
+  hasher.mix(target_.speed_mps());
+  hasher.mix(target_.turn_rate_rad_s());
   hasher.mix(target_.destroyed());
+  // Queued/scheduled inputs are mutable state too: a replay that diverged in
+  // command handling must not slip past the hash comparison.
+  hasher.mix(static_cast<std::uint64_t>(pending_.size()));
+  for (const FireCommand& c : pending_) {
+    hasher.mix(c.azimuth_rad);
+    hasher.mix(c.elevation_rad);
+    hasher.mix(static_cast<std::uint64_t>(c.salvo_count));
+    hasher.mix(c.dispersion_mrad);
+    hasher.mix(c.launch_interval_s);
+  }
+  hasher.mix(static_cast<std::uint64_t>(scheduled_.size()));
+  for (const ScheduledLaunch& s : scheduled_) {
+    hasher.mix(s.tick);
+    hasher.mix(s.azimuth_rad);
+    hasher.mix(s.elevation_rad);
+    hasher.mix(s.dispersion_mrad);
+  }
   hasher.mix(static_cast<std::uint64_t>(rockets_.size()));
   for (const Rocket& r : rockets_) {
     hasher.mix(static_cast<std::uint64_t>(r.id));

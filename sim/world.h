@@ -10,13 +10,12 @@
 #include "sim/environment.h"
 #include "sim/target.h"
 
+#include "sim/constants.h"
+
 // Fixed-tick (60Hz) authoritative world: weather, one air target, rocket
 // salvos in flight, engagement adjudication. Update order inside step() is
 // fixed and documented — part of the determinism contract (charter §5.1).
 namespace seashield::sim {
-
-inline constexpr double kTickRateHz = 60.0;
-inline constexpr double kTickDt = 1.0 / kTickRateHz;
 
 // The only external input of P2: a fire command. Journaled with the tick it
 // was queued at (charter §5.8).

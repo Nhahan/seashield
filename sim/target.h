@@ -45,6 +45,8 @@ class Target {
     return {speed_ * math::sin(heading_), speed_ * math::cos(heading_), 0.0};
   }
   double heading_rad() const { return heading_; }
+  double speed_mps() const { return speed_; }
+  double turn_rate_rad_s() const { return turn_rate_; }
   bool destroyed() const { return destroyed_; }
   void destroy() { destroyed_ = true; }
 

@@ -2,15 +2,19 @@
 
 #include <algorithm>
 
+#include "sim/constants.h"
 #include "sim/engagement.h"
-#include "sim/world.h"
 
 namespace seashield::sim {
 
 namespace {
-constexpr math::Vec3 kLaunchPosition{0.0, 0.0, 2.0};
 constexpr double kMinElevation = math::deg_to_rad(0.5);
+// Physical search bound for the Newton iteration. Distinct from the
+// direct-arc INITIALIZATION ceiling below: the re-init value only selects the
+// branch the search starts on; Newton may legitimately climb above it for
+// high/close targets, up to this bound.
 constexpr double kMaxElevation = math::deg_to_rad(80.0);
+constexpr double kDirectArcInitElevation = math::deg_to_rad(45.0);
 constexpr double kConvergedMissM = 1.0;
 // PIP time fixed-point tolerance. The tolerance leaks into the miss distance
 // scaled by the closing speed (~500 m/s), so 5 ms keeps it under ~3 m.
@@ -83,7 +87,7 @@ std::optional<FiringSolution> FireControlSolver::solve(const math::Vec3& target_
     const double ground_range = math::sqrt(aim.x * aim.x + aim.y * aim.y);
     el = std::clamp(math::atan2(aim.z - kLaunchPosition.z, ground_range) +
                         math::deg_to_rad(8.0),
-                    kMinElevation, math::deg_to_rad(45.0));
+                    kMinElevation, kDirectArcInitElevation);
 
     // 2D Newton (finite-difference Jacobian) on the miss components
     // perpendicular to the line of sight: crosswind axis and vertical axis.
@@ -91,9 +95,11 @@ std::optional<FiringSolution> FireControlSolver::solve(const math::Vec3& target_
     const math::Vec3 cross_axis{math::cos(bearing), -math::sin(bearing), 0.0};
     const math::Vec3 up_axis{0.0, 0.0, 1.0};
 
+    bool last_matches_angles = false;
     for (int iter = 0; iter < kMaxNewtonIterations; ++iter) {
       last = shoot(az, el, aim);
       ++probes;
+      last_matches_angles = true;
       if (last.miss_m < kConvergedMissM) {
         break;
       }
@@ -123,6 +129,13 @@ std::optional<FiringSolution> FireControlSolver::solve(const math::Vec3& target_
       del = std::clamp(del, -kMaxStep, kMaxStep);
       az += daz;
       el = std::clamp(el + del, kMinElevation, kMaxElevation);
+      last_matches_angles = false;
+    }
+    if (!last_matches_angles) {
+      // The Newton loop ended right after taking a step: re-shoot so the
+      // reported time/miss describe the angles actually being returned.
+      last = shoot(az, el, aim);
+      ++probes;
     }
 
     if (last.time_s <= 0.0) {
