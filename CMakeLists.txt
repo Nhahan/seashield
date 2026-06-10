@@ -35,6 +35,7 @@ endif()
 
 add_library(seashield_core STATIC
   core/logger.cpp
+  sim/ballistics.cpp
   sim/environment.cpp
   net/acceptor.cpp
   net/event_loop.cpp
@@ -64,6 +65,8 @@ if(SEASHIELD_BUILD_TESTS)
 
   enable_testing()
   add_executable(seashield_tests
+    tests/ballistics_test.cpp
+    tests/engagement_test.cpp
     tests/environment_test.cpp
     tests/event_loop_test.cpp
     tests/frame_parser_test.cpp
@@ -71,9 +74,12 @@ if(SEASHIELD_BUILD_TESTS)
     tests/math_test.cpp
     tests/pcg32_test.cpp
     tests/send_queue_test.cpp
+    tests/target_test.cpp
     tests/unique_fd_test.cpp
   )
   target_link_libraries(seashield_tests PRIVATE seashield_core GTest::gtest_main)
+  target_compile_definitions(seashield_tests
+    PRIVATE SEASHIELD_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
   include(GoogleTest)
   gtest_discover_tests(seashield_tests)
