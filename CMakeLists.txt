@@ -22,8 +22,18 @@ elseif(NOT SEASHIELD_SANITIZE STREQUAL "")
   message(FATAL_ERROR "Unknown SEASHIELD_SANITIZE value: ${SEASHIELD_SANITIZE}")
 endif()
 
+if(APPLE)
+  set(SEASHIELD_EVENT_LOOP_BACKEND net/kqueue_event_loop.cpp)
+elseif(UNIX)
+  set(SEASHIELD_EVENT_LOOP_BACKEND net/epoll_event_loop.cpp)
+else()
+  message(FATAL_ERROR "Unsupported platform: SeaShield requires kqueue or epoll")
+endif()
+
 add_library(seashield_core STATIC
   core/logger.cpp
+  net/event_loop.cpp
+  ${SEASHIELD_EVENT_LOOP_BACKEND}
 )
 target_include_directories(seashield_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
@@ -38,6 +48,7 @@ if(SEASHIELD_BUILD_TESTS)
 
   enable_testing()
   add_executable(seashield_tests
+    tests/event_loop_test.cpp
     tests/unique_fd_test.cpp
   )
   target_link_libraries(seashield_tests PRIVATE seashield_core GTest::gtest_main)
