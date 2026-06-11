@@ -55,6 +55,7 @@ add_library(seashield_core STATIC
   sim/journal.cpp
   sim/radar.cpp
   sim/scenario.cpp
+  sim/target.cpp
   sim/tracking.cpp
   sim/world.cpp
   net/acceptor.cpp

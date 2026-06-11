@@ -146,6 +146,16 @@ std::optional<Scenario> load_scenario_text(const std::string& text, std::string*
   cfg.target.speed_mps = kv.get_double("target_speed", 250.0);
   cfg.target.turn_rate_rad_s = math::deg_to_rad(kv.get_double("target_turn_rate_deg", 0.0));
 
+  // ASM maneuver profile (charter §5.3): range triggers default to 0 = off,
+  // so legacy scenarios keep their exact behaviour.
+  cfg.target.popup_range_m = kv.get_double("asm_popup_range_m", 0.0);
+  cfg.target.popup_altitude_m = kv.get_double("asm_popup_altitude_m", cfg.target.popup_altitude_m);
+  cfg.target.popup_climb_angle_rad = math::deg_to_rad(kv.get_double("asm_popup_climb_deg", 25.0));
+  cfg.target.weave_range_m = kv.get_double("asm_weave_range_m", 0.0);
+  cfg.target.weave_turn_rate_rad_s =
+      math::deg_to_rad(kv.get_double("asm_weave_turn_deg_s", 15.0));
+  cfg.target.weave_period_s = kv.get_double("asm_weave_period_s", cfg.target.weave_period_s);
+
   cfg.rocket.mass_kg = kv.get_double("rocket_mass", cfg.rocket.mass_kg);
   cfg.rocket.cda_m2 = kv.get_double("rocket_cda", cfg.rocket.cda_m2);
   cfg.rocket.thrust_n = kv.get_double("rocket_thrust", cfg.rocket.thrust_n);

@@ -143,6 +143,11 @@ std::uint64_t World::state_hash() const {
   hasher.mix(target_.speed_mps());
   hasher.mix(target_.turn_rate_rad_s());
   hasher.mix(target_.destroyed());
+  // ASM maneuver state (P4): the phase machine and the weave anchor are
+  // mutable state the legacy fields above cannot reconstruct.
+  hasher.mix(static_cast<std::uint64_t>(target_.phase()));
+  hasher.mix(target_.weaving());
+  hasher.mix(target_.weave_elapsed_s());
   // Queued/scheduled inputs are mutable state too: a replay that diverged in
   // command handling must not slip past the hash comparison.
   hasher.mix(static_cast<std::uint64_t>(pending_.size()));
