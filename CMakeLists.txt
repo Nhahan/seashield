@@ -74,6 +74,7 @@ target_include_directories(seashield_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 add_library(seashield_app STATIC
   server/sim_server.cpp
   tools/dummy_client.cpp
+  tools/experiment/experiment.cpp
   tools/net_chaos_proxy.cpp
 )
 target_link_libraries(seashield_app PUBLIC seashield_core seashield_protocol)
@@ -93,6 +94,9 @@ target_link_libraries(netproxy PRIVATE seashield_app)
 add_executable(dummyclient tools/dummyclient_main.cpp)
 target_link_libraries(dummyclient PRIVATE seashield_app)
 
+add_executable(fc_experiment tools/experiment/main.cpp)
+target_link_libraries(fc_experiment PRIVATE seashield_app)
+
 if(SEASHIELD_BUILD_TESTS)
   include(FetchContent)
   FetchContent_Declare(
@@ -110,6 +114,7 @@ if(SEASHIELD_BUILD_TESTS)
     tests/environment_test.cpp
     tests/fire_control_test.cpp
     tests/event_loop_test.cpp
+    tests/experiment_smoke_test.cpp
     tests/frame_parser_test.cpp
     tests/integration_test.cpp
     tests/math_test.cpp
