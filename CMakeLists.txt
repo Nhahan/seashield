@@ -110,6 +110,7 @@ if(SEASHIELD_BUILD_TESTS)
     tests/frame_parser_test.cpp
     tests/integration_test.cpp
     tests/math_test.cpp
+    tests/matrix_test.cpp
     tests/messages_test.cpp
     tests/pcg32_test.cpp
     tests/protocol_integration_test.cpp
