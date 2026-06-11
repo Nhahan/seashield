@@ -66,6 +66,13 @@ add_library(seashield_core STATIC
 )
 target_include_directories(seashield_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Server assembly and headless tool components (chaos proxy, later the dummy
+# client) shared between executables and the integration tests.
+add_library(seashield_app STATIC
+  tools/net_chaos_proxy.cpp
+)
+target_link_libraries(seashield_app PUBLIC seashield_core seashield_protocol)
+
 add_executable(seashield_server server/main.cpp)
 target_link_libraries(seashield_server PRIVATE seashield_core)
 
@@ -74,6 +81,9 @@ target_link_libraries(loadclient PRIVATE seashield_core)
 
 add_executable(ballistic_sandbox tools/ballistic_sandbox/main.cpp)
 target_link_libraries(ballistic_sandbox PRIVATE seashield_core)
+
+add_executable(netproxy tools/netproxy_main.cpp)
+target_link_libraries(netproxy PRIVATE seashield_app)
 
 if(SEASHIELD_BUILD_TESTS)
   include(FetchContent)
