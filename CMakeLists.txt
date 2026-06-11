@@ -112,6 +112,7 @@ if(SEASHIELD_BUILD_TESTS)
     tests/math_test.cpp
     tests/messages_test.cpp
     tests/pcg32_test.cpp
+    tests/protocol_integration_test.cpp
     tests/reliable_test.cpp
     tests/scenario_test.cpp
     tests/send_queue_test.cpp
@@ -121,7 +122,7 @@ if(SEASHIELD_BUILD_TESTS)
     tests/wire_test.cpp
     tests/world_test.cpp
   )
-  target_link_libraries(seashield_tests PRIVATE seashield_core seashield_protocol GTest::gtest_main)
+  target_link_libraries(seashield_tests PRIVATE seashield_app GTest::gtest_main)
   target_compile_definitions(seashield_tests
     PRIVATE SEASHIELD_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
