@@ -70,6 +70,7 @@ target_include_directories(seashield_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # dummy client) shared between executables and the integration tests.
 add_library(seashield_app STATIC
   server/sim_server.cpp
+  tools/dummy_client.cpp
   tools/net_chaos_proxy.cpp
 )
 target_link_libraries(seashield_app PUBLIC seashield_core seashield_protocol)
@@ -85,6 +86,9 @@ target_link_libraries(ballistic_sandbox PRIVATE seashield_core)
 
 add_executable(netproxy tools/netproxy_main.cpp)
 target_link_libraries(netproxy PRIVATE seashield_app)
+
+add_executable(dummyclient tools/dummyclient_main.cpp)
+target_link_libraries(dummyclient PRIVATE seashield_app)
 
 if(SEASHIELD_BUILD_TESTS)
   include(FetchContent)
