@@ -63,6 +63,14 @@ TEST(DeterminismTest, DifferentGustSeedDiverges) {
   EXPECT_NE(run_canonical(canonical_config()).back(), run_canonical(other).back());
 }
 
+TEST(DeterminismTest, RadarTuningIsCoveredByHash) {
+  // The sensor chain is mutable state: a change to its noise model must show
+  // up in the hash, or replays could silently diverge on tracking.
+  WorldConfig other = canonical_config();
+  other.radar.sigma_range_m *= 2.0;
+  EXPECT_NE(run_canonical(canonical_config()).back(), run_canonical(other).back());
+}
+
 TEST(DeterminismTest, JournalSerializationRoundTripsBitExactly) {
   Journal journal;
   FireCommand cmd;
@@ -116,6 +124,18 @@ TEST(DeterminismTest, ReplayFromJournalMatchesOriginalRun) {
     replay.step();
   }
   EXPECT_EQ(original.state_hash(), replay.state_hash());
+
+  // The replay reproduces the SENSOR'S view too: identical track lifecycle,
+  // event for event — what makes an AAR review of "what the operator saw"
+  // trustworthy (charter §5.8).
+  ASSERT_EQ(original.track_events().size(), replay.track_events().size());
+  for (std::size_t i = 0; i < original.track_events().size(); ++i) {
+    EXPECT_EQ(original.track_events()[i].tick, replay.track_events()[i].tick);
+    EXPECT_EQ(original.track_events()[i].track_id, replay.track_events()[i].track_id);
+    EXPECT_EQ(original.track_events()[i].kind, replay.track_events()[i].kind);
+  }
+  EXPECT_FALSE(original.track_events().empty())
+      << "canonical run produced no track activity — the assertion above is vacuous";
 }
 
 std::string golden_path() {

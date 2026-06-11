@@ -15,6 +15,9 @@ World::World(const WorldConfig& config)
       gust_(config.weather.turbulence_intensity * config.weather.surface_wind_speed(),
             config.gust_seed),
       target_(config.target),
+      radar_(config.radar, config.weather.rain_intensity, config.sim_seed),
+      tracker_(config.tracker),
+      solver_(config.weather, config.rocket),
       dispersion_rng_(config.sim_seed, /*stream=*/10),
       pk_rng_(config.sim_seed, /*stream=*/11) {}
 
@@ -87,6 +90,34 @@ void World::step() {
 
   const math::Vec3 target_prev = target_.position();
   target_.step(kTickDt);
+
+  // (4b) Radar scan + (4c) tracker — the sensor chain observes the post-move
+  // target (charter §4.6 순서: 물리→레이더→추적→…→판정). A destroyed target
+  // returns no echoes, so its track coasts and dies naturally: kill
+  // assessment is sensor-based too (charter §2.1).
+  plots_scratch_.clear();
+  if (!target_.destroyed()) {
+    const math::Vec3 target_truth = target_.position();
+    radar_.step(tick_, {&target_truth, 1}, plots_scratch_);
+  } else {
+    radar_.step(tick_, {}, plots_scratch_);
+  }
+  tracker_.predict();
+  if (!plots_scratch_.empty()) {
+    tracker_.update(plots_scratch_, tick_);
+  }
+  if (radar_.scan_index(tick_ + 1) != radar_.scan_index(tick_)) {
+    tracker_.on_scan_boundary(tick_);
+  }
+  for (const TrackEvent& event : tracker_.drain_events()) {
+    static constexpr const char* kKindNames[] = {"initiated", "confirmed", "dropped"};
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "track %u %s", event.track_id,
+                  kKindNames[static_cast<std::size_t>(event.kind)]);
+    events_.push_back({tick_, buf});
+    track_events_.push_back(event);
+  }
+
   const FlightEnvironment env = flight_environment();
 
   for (Rocket& rocket : rockets_) {
@@ -133,6 +164,31 @@ bool World::ordnance_resolved() const {
   }
   return std::none_of(rockets_.begin(), rockets_.end(),
                       [](const Rocket& r) { return r.alive; });
+}
+
+std::optional<FiringSolution> World::solve_for_track(std::uint32_t track_id,
+                                                    SolveForTrackError* reason) const {
+  const auto fail = [&](SolveForTrackError why) -> std::optional<FiringSolution> {
+    if (reason != nullptr) {
+      *reason = why;
+    }
+    return std::nullopt;
+  };
+  const Track* track = tracker_.find(track_id);
+  if (track == nullptr) {
+    return fail(SolveForTrackError::kNoSuchTrack);
+  }
+  if (track->status != TrackStatus::kConfirmed) {
+    return fail(SolveForTrackError::kNotConfirmed);
+  }
+  // The estimated state slots straight into the truth-based solver: both are
+  // a (position, velocity) pair under CV extrapolation. Sensor noise rides in
+  // unannounced — exactly the error propagation P4 exists to measure.
+  auto solution = solver_.solve(track->position(), track->velocity());
+  if (!solution.has_value()) {
+    return fail(SolveForTrackError::kNoSolution);
+  }
+  return solution;
 }
 
 std::uint64_t World::state_hash() const {
@@ -186,6 +242,39 @@ std::uint64_t World::state_hash() const {
   hasher.mix(gust_.rng_state());
   hasher.mix(dispersion_rng_.state());
   hasher.mix(pk_rng_.state());
+  // Sensor chain (P4): radar RNG progress and the current-scan plot buffer...
+  hasher.mix(radar_.detection_rng_state());
+  hasher.mix(radar_.noise_rng_state());
+  hasher.mix(static_cast<std::uint64_t>(radar_.last_scan_plots().size()));
+  for (const Plot& plot : radar_.last_scan_plots()) {
+    hasher.mix(plot.tick);
+    hasher.mix(static_cast<std::uint64_t>(plot.scan_index));
+    hasher.mix(plot.range_m);
+    hasher.mix(plot.azimuth_rad);
+    hasher.mix(plot.elevation_rad);
+    hasher.mix(plot.position);
+  }
+  // ...and every track in full, INCLUDING all 36 covariance entries: an
+  // asymmetry or numerical drift in P is a determinism defect and must trip
+  // the golden regression, not hide behind a summary.
+  hasher.mix(static_cast<std::uint64_t>(tracker_.next_track_id()));
+  hasher.mix(static_cast<std::uint64_t>(tracker_.tracks().size()));
+  for (const Track& track : tracker_.tracks()) {
+    hasher.mix(static_cast<std::uint64_t>(track.id));
+    hasher.mix(static_cast<std::uint64_t>(track.status));
+    hasher.mix(track.last_update_tick);
+    hasher.mix(static_cast<std::uint64_t>(track.scan_history));
+    hasher.mix(static_cast<std::uint64_t>(track.consecutive_missed_scans));
+    hasher.mix(track.updated_this_scan);
+    for (int i = 0; i < 6; ++i) {
+      hasher.mix(track.filter.state()[i]);
+    }
+    for (int r = 0; r < 6; ++r) {
+      for (int c = 0; c < 6; ++c) {
+        hasher.mix(track.filter.covariance()(r, c));
+      }
+    }
+  }
   return hasher.value();
 }
 

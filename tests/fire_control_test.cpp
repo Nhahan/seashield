@@ -130,5 +130,76 @@ TEST(FireControlTest, UnreachableTargetReturnsNoSolution) {
   EXPECT_FALSE(solver.solve({40000, 0, 9000}, {0, 0, 0}).has_value());
 }
 
+// P4: the same engagement fired from TRUTH vs from the ESTIMATED track.
+// Identical seeds make both runs reach the identical world state at the solve
+// tick, so the miss difference is purely the sensor/tracking error propagating
+// through the solver (charter §5.6 항목 1). Statistical sweeps over many
+// seeds belong to the experiment harness; this is the single-seed regression.
+TEST(FireControlTest, EstimateFedSolutionDegradesGracefully) {
+  WorldConfig cfg;
+  cfg.weather = calm_weather();
+  cfg.target = crossing_target();
+  cfg.radar.scan_period_s = 0.5;  // Fast scans: confirmed track within ~2 s.
+
+  enum class Source { kTruth, kTrack };
+  const auto run_engagement = [&](Source source, double* out_miss) -> bool {
+    World world(cfg);
+    // Deterministic solve tick: first tick with a confirmed track that has
+    // seen at least 10 scans (settled velocity estimate).
+    std::uint32_t scans_after_confirm = 0;
+    while (world.tick() < 60 * 30) {
+      world.step();
+      const auto& tracks = world.tracker().tracks();
+      if (!tracks.empty() && tracks[0].status == TrackStatus::kConfirmed &&
+          ++scans_after_confirm >= 10 * 30) {  // ~10 scans at 0.5 s in ticks.
+        break;
+      }
+    }
+    const auto& tracks = world.tracker().tracks();
+    if (tracks.empty() || tracks[0].status != TrackStatus::kConfirmed) {
+      return false;
+    }
+
+    std::optional<FiringSolution> solution;
+    if (source == Source::kTruth) {
+      const FireControlSolver solver(cfg.weather, cfg.rocket);
+      solution = solver.solve(world.target().position(), world.target().velocity());
+    } else {
+      solution = world.solve_for_track(tracks[0].id);
+    }
+    if (!solution.has_value()) {
+      return false;
+    }
+
+    FireCommand cmd;
+    cmd.azimuth_rad = solution->azimuth_rad;
+    cmd.elevation_rad = solution->elevation_rad;
+    cmd.salvo_count = 1;
+    cmd.dispersion_mrad = 0.0;  // Isolate the aiming error from launcher scatter.
+    world.queue_fire(cmd);
+    while (!world.ordnance_resolved() && world.tick() < 60 * 60) {
+      world.step();
+    }
+    if (world.results().empty()) {
+      return false;
+    }
+    *out_miss = world.results()[0].miss_distance_m;
+    return true;
+  };
+
+  double truth_miss = 0.0;
+  double track_miss = 0.0;
+  ASSERT_TRUE(run_engagement(Source::kTruth, &truth_miss));
+  ASSERT_TRUE(run_engagement(Source::kTrack, &track_miss));
+
+  // Truth aim on a non-maneuvering target in calm air is near-perfect.
+  EXPECT_LT(truth_miss, 12.0);
+  // The estimate-fed shot is worse — that is the point — but bounded: the
+  // tracking error must not blow the shot into the next county.
+  EXPECT_LT(track_miss, 250.0);
+  EXPECT_LE(truth_miss, track_miss + 1.0)
+      << "estimated track outperformed truth — check the harness, not the luck";
+}
+
 }  // namespace
 }  // namespace seashield::sim

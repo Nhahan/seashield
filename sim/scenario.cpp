@@ -50,6 +50,20 @@ class KeyValues {
     return value;
   }
 
+  // Strict integer accessor (M-of-N counts and the like): the full-parse
+  // check rejects "3.5" or trailing garbage the double path would mask.
+  int get_int(const std::string& key, int fallback) {
+    auto it = values_.find(key);
+    if (it == values_.end()) {
+      return fallback;
+    }
+    consumed_.insert({it->first, true});
+    char* end = nullptr;
+    const long value = std::strtol(it->second.c_str(), &end, 10);
+    check_fully_parsed(key, it->second, end);
+    return static_cast<int>(value);
+  }
+
   // First key whose value contained numeric garbage ("target_speed = abc").
   const std::optional<std::string>& invalid_value_key() const { return invalid_value_key_; }
 
@@ -163,6 +177,34 @@ std::optional<Scenario> load_scenario_text(const std::string& text, std::string*
   cfg.rocket.max_lifetime_s = kv.get_double("rocket_lifetime", cfg.rocket.max_lifetime_s);
   cfg.rocket.proximity_fuze_radius_m =
       kv.get_double("rocket_fuze_radius", cfg.rocket.proximity_fuze_radius_m);
+
+  // Sensor chain (P4): radar and tracker tuning, all defaulted so legacy
+  // scenarios run unchanged (the defaults live in Radar/TrackerParams).
+  cfg.radar.scan_period_s = kv.get_double("radar_scan_period_s", cfg.radar.scan_period_s);
+  cfg.radar.antenna_height_m = kv.get_double("radar_height_m", cfg.radar.antenna_height_m);
+  cfg.radar.reference_range_m = kv.get_double("radar_ref_range_m", cfg.radar.reference_range_m);
+  cfg.radar.pd_steepness_db = kv.get_double("radar_pd_steepness_db", cfg.radar.pd_steepness_db);
+  cfg.radar.sigma_range_m = kv.get_double("radar_sigma_range_m", cfg.radar.sigma_range_m);
+  if (kv.has("radar_sigma_az_mrad")) {
+    cfg.radar.sigma_az_rad = math::mrad_to_rad(kv.get_double("radar_sigma_az_mrad", 0.0));
+  }
+  if (kv.has("radar_sigma_el_mrad")) {
+    cfg.radar.sigma_el_rad = math::mrad_to_rad(kv.get_double("radar_sigma_el_mrad", 0.0));
+  }
+  cfg.radar.rain_atten_db_per_km =
+      kv.get_double("radar_rain_atten_db_per_km", cfg.radar.rain_atten_db_per_km);
+
+  cfg.tracker.accel_noise_mps2 = kv.get_double("track_accel_noise", cfg.tracker.accel_noise_mps2);
+  cfg.tracker.gate_gamma = kv.get_double("track_gate_gamma", cfg.tracker.gate_gamma);
+  cfg.tracker.confirm_m = kv.get_int("track_confirm_m", cfg.tracker.confirm_m);
+  cfg.tracker.confirm_n = kv.get_int("track_confirm_n", cfg.tracker.confirm_n);
+  cfg.tracker.drop_after_misses = kv.get_int("track_drop_misses", cfg.tracker.drop_after_misses);
+  cfg.tracker.init_velocity_sigma_mps =
+      kv.get_double("track_init_vel_sigma", cfg.tracker.init_velocity_sigma_mps);
+  if (cfg.tracker.confirm_m < 1 || cfg.tracker.confirm_n < cfg.tracker.confirm_m ||
+      cfg.tracker.confirm_n > 32 || cfg.tracker.drop_after_misses < 1) {
+    return fail("invalid track confirmation parameters (need 1 <= M <= N <= 32, misses >= 1)");
+  }
 
   if (const auto& invalid = kv.invalid_value_key()) {
     return fail("invalid numeric value for key '" + *invalid + "'");
