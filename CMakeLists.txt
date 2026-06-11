@@ -53,6 +53,7 @@ add_library(seashield_core STATIC
   sim/environment.cpp
   sim/fire_control.cpp
   sim/journal.cpp
+  sim/radar.cpp
   sim/scenario.cpp
   sim/world.cpp
   net/acceptor.cpp
@@ -113,6 +114,7 @@ if(SEASHIELD_BUILD_TESTS)
     tests/matrix_test.cpp
     tests/messages_test.cpp
     tests/pcg32_test.cpp
+    tests/radar_test.cpp
     tests/protocol_integration_test.cpp
     tests/reliable_test.cpp
     tests/scenario_test.cpp
