@@ -16,3 +16,6 @@ cmake-build-*/
 *.a
 *.dylib
 *.so
+
+# Internal working documents (not published)
+docs/internal/
