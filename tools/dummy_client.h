@@ -53,7 +53,7 @@ struct DummyClientReport {
 
   std::vector<protocol::EngagementEvent> events;
   // Application-level double check on top of the reliable layer's dedup: a
-  // (kind, rocket_id, tick) triple arriving twice means exactly-once broke.
+  // (kind, subject_id, tick) triple arriving twice means exactly-once broke.
   bool duplicate_event = false;
 };
 

@@ -179,7 +179,7 @@ TEST(MessagesTest, EngagementEventRoundTrip) {
   EngagementEvent ev;
   ev.tick = 777;
   ev.kind = EventKind::kRocketResolved;
-  ev.rocket_id = 5;
+  ev.subject_id = 5;
   ev.miss_distance_m = 5.3F;
   ev.detonated = true;
   ev.killed = true;
@@ -190,10 +190,121 @@ TEST(MessagesTest, EngagementEventRoundTrip) {
   ASSERT_NE(m, nullptr);
   EXPECT_EQ(m->tick, 777u);
   EXPECT_EQ(m->kind, EventKind::kRocketResolved);
-  EXPECT_EQ(m->rocket_id, 5);
+  EXPECT_EQ(m->subject_id, 5);
   EXPECT_EQ(m->miss_distance_m, 5.3F);
   EXPECT_TRUE(m->detonated);
   EXPECT_TRUE(m->killed);
+}
+
+TEST(MessagesTest, TrackEntityRoundTripsWithSigmaFlags) {
+  EntityRecord track;
+  track.id = 3;
+  track.kind = EntityKind::kTrack;
+  track.state = 2;  // Coasting.
+  track.flags = quantize_track_sigma(45.0);
+  track.pos_x = 5200.0;
+  track.vel_y = -240.0;
+
+  Writer w;
+  track.encode(w);
+  EXPECT_EQ(w.size(), kEntityRecordBytes);
+  Reader r(w.data());
+  const auto decoded = EntityRecord::decode(r);
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(decoded->kind, EntityKind::kTrack);
+  EXPECT_EQ(decoded->state, 2);
+  // Log quantization: ~4.7% per step round-trip accuracy.
+  EXPECT_NEAR(dequantize_track_sigma(decoded->flags), 45.0, 45.0 * 0.05);
+}
+
+TEST(MessagesTest, TrackSigmaQuantizationCoversTheLogRange) {
+  EXPECT_EQ(quantize_track_sigma(0.0), 0);
+  EXPECT_EQ(quantize_track_sigma(-1.0), 0);
+  EXPECT_EQ(quantize_track_sigma(0.1), 0);
+  EXPECT_EQ(quantize_track_sigma(1e9), 255);
+  for (const double sigma : {0.5, 5.0, 50.0, 500.0, 5000.0}) {
+    const double back = dequantize_track_sigma(quantize_track_sigma(sigma));
+    EXPECT_NEAR(back, sigma, sigma * 0.05) << "sigma " << sigma;
+  }
+}
+
+TEST(MessagesTest, TrackLifecycleEventsRoundTrip) {
+  for (const EventKind kind : {EventKind::kTrackConfirmed, EventKind::kTrackLost}) {
+    EngagementEvent ev;
+    ev.tick = 360;
+    ev.kind = kind;
+    ev.subject_id = 7;  // Track id rides the renamed subject field.
+    const auto decoded = data_round_trip(ev);
+    ASSERT_TRUE(decoded.has_value());
+    const auto* m = std::get_if<EngagementEvent>(&*decoded);
+    ASSERT_NE(m, nullptr);
+    EXPECT_EQ(m->kind, kind);
+    EXPECT_EQ(m->subject_id, 7);
+  }
+}
+
+TEST(MessagesTest, FireRequestCarriesTrackDesignation) {
+  FireRequest fire;
+  fire.track_id = 12;
+  fire.azimuth_rad = 0.01;  // Operator offset in track mode.
+  const auto decoded = control_round_trip(fire);
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(std::get<FireRequest>(*decoded).track_id, 12);
+}
+
+TEST(MessagesTest, FireSolutionRoundTrips) {
+  FireSolution solution;
+  solution.tick = 720;
+  solution.track_id = 4;
+  solution.valid = true;
+  solution.pip_x = 3120.55;
+  solution.pip_y = -880.21;
+  solution.pip_z = 410.07;
+  solution.time_of_flight_s = 9.25F;
+  solution.dispersion_radius_m = 38.5F;
+
+  const auto decoded = data_round_trip(solution);
+  ASSERT_TRUE(decoded.has_value());
+  const auto* m = std::get_if<FireSolution>(&*decoded);
+  ASSERT_NE(m, nullptr);
+  EXPECT_TRUE(m->valid);
+  EXPECT_EQ(m->track_id, 4);
+  EXPECT_NEAR(m->pip_x, 3120.55, kPositionLsbM / 2 + 1e-9);
+  EXPECT_NEAR(m->pip_z, 410.07, kPositionLsbM / 2 + 1e-9);
+  EXPECT_EQ(m->time_of_flight_s, 9.25F);
+}
+
+TEST(MessagesTest, V2GuardsAcceptNewEnumsAndRejectTheNextOnes) {
+  // The v1->v2 trap: forgetting the guard would make the server reject its
+  // OWN snapshots. Pin both sides of each boundary.
+  Writer w;
+  w.u16(1);
+  w.u8(static_cast<std::uint8_t>(EntityKind::kTrack));
+  w.u8(0);
+  w.u8(0);
+  for (int i = 0; i < 3; ++i) w.i24(0);
+  for (int i = 0; i < 3; ++i) w.i16(0);
+  Reader r(w.data());
+  EXPECT_TRUE(EntityRecord::decode(r).has_value());
+
+  Writer w2;
+  w2.u16(1);
+  w2.u8(3);  // One past kTrack.
+  w2.u8(0);
+  w2.u8(0);
+  for (int i = 0; i < 3; ++i) w2.i24(0);
+  for (int i = 0; i < 3; ++i) w2.i16(0);
+  Reader r2(w2.data());
+  EXPECT_FALSE(EntityRecord::decode(r2).has_value());
+
+  Writer w3;
+  w3.u32(1);
+  w3.u8(6);  // One past kTrackLost.
+  w3.u16(0);
+  w3.f32(0.0F);
+  w3.u8(0);
+  w3.u8(0);
+  EXPECT_FALSE(decode_data_message(MsgType::kEngagementEvent, w3.data()).has_value());
 }
 
 TEST(MessagesTest, DecodeRejectsUnknownTypeTruncationAndTrailingBytes) {

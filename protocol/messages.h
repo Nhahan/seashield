@@ -22,7 +22,11 @@
 // receiver can reconstruct order without an ordered channel (charter §5.7).
 namespace seashield::protocol {
 
-inline constexpr std::uint16_t kProtocolVersion = 1;
+// v2 (P4): kTrack entities, track lifecycle events, FireRequest.track_id,
+// FireSolution. Strict decoders silently reject unknown enums, so mixed
+// versions would "half work" (no tracks visible) — bumping forces the loud
+// failure instead. v1->v2 history: docs/architecture/protocol-spec.md.
+inline constexpr std::uint16_t kProtocolVersion = 2;
 
 // Hard ceiling for one UDP datagram including the 12-byte packet header
 // (charter §6 "단편화 정책"): snapshots above this split into independently
@@ -41,6 +45,7 @@ enum class MsgType : std::uint8_t {
   kKeepalive = 18,
   kSnapshot = 19,
   kEngagementEvent = 20,
+  kFireSolution = 21,
 };
 
 // Console roles (charter §3.2). kSolo is the single-client mode that holds
@@ -62,6 +67,7 @@ enum class RejectReason : std::uint8_t {
 enum class EntityKind : std::uint8_t {
   kTarget = 0,
   kRocket = 1,
+  kTrack = 2,  // Kalman ESTIMATE of a target — what the consoles actually see.
 };
 
 enum class EventKind : std::uint8_t {
@@ -69,6 +75,12 @@ enum class EventKind : std::uint8_t {
   kRocketResolved = 1,
   kTargetDestroyed = 2,
   kEngagementEnd = 3,
+  // Track lifecycle (P4). Initiation has no event on purpose: tentative
+  // tracks are frequent and short-lived, and the snapshot's state byte
+  // already shows them — only the transitions a console must not miss ride
+  // the reliable channel (charter §4.3 채널 배정 철학).
+  kTrackConfirmed = 4,
+  kTrackLost = 5,
 };
 
 enum class EngagementPhase : std::uint8_t {
@@ -93,6 +105,12 @@ std::int32_t quantize_position(double meters);
 double dequantize_position(std::int32_t q);
 std::int16_t quantize_velocity(double mps);
 double dequantize_velocity(std::int16_t q);
+
+// Track quality (position σ, meters) in the EntityRecord flags byte:
+// logarithmic, q = 50·log10(σ/0.1 m), covering 0.1 m..12.6 km at ~4.7% per
+// step — plenty for drawing an uncertainty ellipse on the PPI.
+std::uint8_t quantize_track_sigma(double sigma_m);
+double dequantize_track_sigma(std::uint8_t q);
 
 // --- TCP control messages ---------------------------------------------------
 
@@ -136,6 +154,10 @@ struct FireRequest {
   std::uint16_t salvo_count = 1;
   double dispersion_mrad = 5.0;
   double launch_interval_s = 0.05;
+  // 0 = manual fire at the absolute az/el above. Nonzero = fire at this
+  // track's server-computed solution, with az/el reinterpreted as OPERATOR
+  // OFFSETS on top of it (charter §5.6 항목 5 운용자 보정).
+  std::uint16_t track_id = 0;
 
   void encode(Writer& w) const;
   static std::optional<FireRequest> decode(Reader& r);
@@ -175,8 +197,11 @@ struct Keepalive {
 struct EntityRecord {
   std::uint16_t id = 0;
   EntityKind kind = EntityKind::kTarget;
-  std::uint8_t state = 0;  // Target: 0 alive, 1 destroyed. Rocket: 0 boost, 1 glide.
-  std::uint8_t flags = 0;  // Reserved.
+  // Target: 0 alive, 1 destroyed. Rocket: 0 boost, 1 glide.
+  // Track: 0 tentative, 1 confirmed, 2 coasting (confirmed, missing scans).
+  std::uint8_t state = 0;
+  // Track: quantize_track_sigma(position σ). Other kinds: reserved (0).
+  std::uint8_t flags = 0;
   double pos_x = 0.0, pos_y = 0.0, pos_z = 0.0;
   double vel_x = 0.0, vel_y = 0.0, vel_z = 0.0;
 
@@ -207,7 +232,9 @@ struct EngagementEvent {
   static constexpr MsgType kType = MsgType::kEngagementEvent;
   std::uint32_t tick = 0;
   EventKind kind = EventKind::kLaunch;
-  std::uint16_t rocket_id = 0;  // 0 for target/engagement-level events.
+  // Rocket id for launch/resolve, track id for track events, 0 otherwise
+  // (renamed from rocket_id in v2; same wire bytes).
+  std::uint16_t subject_id = 0;
   float miss_distance_m = 0.0F;
   bool detonated = false;
   bool killed = false;
@@ -216,10 +243,27 @@ struct EngagementEvent {
   static std::optional<EngagementEvent> decode(Reader& r);
 };
 
+// Server-computed fire solution for a designated track (charter §4.3 "PIP/
+// 예상 산포 갱신" — unreliable UDP). Defined and tested in P4; the server
+// starts streaming it when the weapons console UI exists (P5).
+struct FireSolution {
+  static constexpr MsgType kType = MsgType::kFireSolution;
+  std::uint32_t tick = 0;
+  std::uint16_t track_id = 0;
+  bool valid = false;  // False = solver did not converge for this track.
+  double pip_x = 0.0, pip_y = 0.0, pip_z = 0.0;  // Quantized like positions.
+  float time_of_flight_s = 0.0F;
+  float dispersion_radius_m = 0.0F;  // Expected 1σ pattern radius at the PIP.
+
+  void encode(Writer& w) const;
+  static std::optional<FireSolution> decode(Reader& r);
+};
+
 // --- Envelopes --------------------------------------------------------------
 
 using ControlMessage = std::variant<ClientHello, ServerWelcome, ServerReject, FireRequest>;
-using DataMessage = std::variant<UdpHello, UdpHelloAck, Keepalive, Snapshot, EngagementEvent>;
+using DataMessage =
+    std::variant<UdpHello, UdpHelloAck, Keepalive, Snapshot, EngagementEvent, FireSolution>;
 
 // TCP frame body: [type u8][payload]. The length-prefix framing itself is
 // net::FrameParser's job (design doc §5).

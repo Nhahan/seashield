@@ -544,7 +544,7 @@ void SimServer::sim_thread_main() {
       protocol::EngagementEvent event;
       event.tick = step_tick;
       event.kind = protocol::EventKind::kLaunch;
-      event.rocket_id = static_cast<std::uint16_t>(rockets[seen_rockets].id);
+      event.subject_id = static_cast<std::uint16_t>(rockets[seen_rockets].id);
       output.events.push_back(event);
     }
     const auto& results = world.results();
@@ -553,7 +553,7 @@ void SimServer::sim_thread_main() {
       protocol::EngagementEvent event;
       event.tick = static_cast<std::uint32_t>(result.end_tick);
       event.kind = protocol::EventKind::kRocketResolved;
-      event.rocket_id = static_cast<std::uint16_t>(result.rocket_id);
+      event.subject_id = static_cast<std::uint16_t>(result.rocket_id);
       event.miss_distance_m = static_cast<float>(result.miss_distance_m);
       event.detonated = result.detonated;
       event.killed = result.killed;

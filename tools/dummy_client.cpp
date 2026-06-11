@@ -174,7 +174,7 @@ DummyClientReport DummyClient::run() {
       report.last_total_entities = snap->total_entities;
       report.last_phase = snap->phase;
     } else if (const auto* event = std::get_if<protocol::EngagementEvent>(&*message)) {
-      const auto key = std::make_tuple(static_cast<std::uint8_t>(event->kind), event->rocket_id,
+      const auto key = std::make_tuple(static_cast<std::uint8_t>(event->kind), event->subject_id,
                                        event->tick);
       if (!seen_events.insert(key).second) {
         report.duplicate_event = true;

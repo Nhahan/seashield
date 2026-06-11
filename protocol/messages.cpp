@@ -10,9 +10,9 @@ namespace {
 // catalogue instead of laundering them into the type system.
 bool valid_role(std::uint8_t v) { return v <= static_cast<std::uint8_t>(Role::kSolo); }
 bool valid_reject(std::uint8_t v) { return v <= static_cast<std::uint8_t>(RejectReason::kBadToken); }
-bool valid_entity_kind(std::uint8_t v) { return v <= static_cast<std::uint8_t>(EntityKind::kRocket); }
+bool valid_entity_kind(std::uint8_t v) { return v <= static_cast<std::uint8_t>(EntityKind::kTrack); }
 bool valid_event_kind(std::uint8_t v) {
-  return v <= static_cast<std::uint8_t>(EventKind::kEngagementEnd);
+  return v <= static_cast<std::uint8_t>(EventKind::kTrackLost);
 }
 bool valid_phase(std::uint8_t v) { return v <= static_cast<std::uint8_t>(EngagementPhase::kEnded); }
 
@@ -40,6 +40,18 @@ std::int16_t quantize_velocity(double mps) {
 }
 
 double dequantize_velocity(std::int16_t q) { return static_cast<double>(q) * kVelocityLsbMps; }
+
+std::uint8_t quantize_track_sigma(double sigma_m) {
+  if (!(sigma_m > 0.1)) {
+    return 0;  // Includes non-finite and degenerate covariances.
+  }
+  const double q = std::round(50.0 * std::log10(sigma_m / 0.1));
+  return static_cast<std::uint8_t>(std::clamp(q, 0.0, 255.0));
+}
+
+double dequantize_track_sigma(std::uint8_t q) {
+  return 0.1 * std::pow(10.0, static_cast<double>(q) / 50.0);
+}
 
 // --- ClientHello -------------------------------------------------------------
 
@@ -107,6 +119,7 @@ void FireRequest::encode(Writer& w) const {
   w.u16(salvo_count);
   w.f64(dispersion_mrad);
   w.f64(launch_interval_s);
+  w.u16(track_id);
 }
 
 std::optional<FireRequest> FireRequest::decode(Reader& r) {
@@ -116,6 +129,7 @@ std::optional<FireRequest> FireRequest::decode(Reader& r) {
   m.salvo_count = r.u16();
   m.dispersion_mrad = r.f64();
   m.launch_interval_s = r.f64();
+  m.track_id = r.u16();
   if (!r.ok()) {
     return std::nullopt;
   }
@@ -223,7 +237,7 @@ std::optional<Snapshot> Snapshot::decode(Reader& r) {
 void EngagementEvent::encode(Writer& w) const {
   w.u32(tick);
   w.u8(static_cast<std::uint8_t>(kind));
-  w.u16(rocket_id);
+  w.u16(subject_id);
   w.f32(miss_distance_m);
   w.u8(detonated ? 1 : 0);
   w.u8(killed ? 1 : 0);
@@ -233,7 +247,7 @@ std::optional<EngagementEvent> EngagementEvent::decode(Reader& r) {
   EngagementEvent m;
   m.tick = r.u32();
   const std::uint8_t kind = r.u8();
-  m.rocket_id = r.u16();
+  m.subject_id = r.u16();
   m.miss_distance_m = r.f32();
   const std::uint8_t detonated = r.u8();
   const std::uint8_t killed = r.u8();
@@ -243,6 +257,36 @@ std::optional<EngagementEvent> EngagementEvent::decode(Reader& r) {
   m.kind = static_cast<EventKind>(kind);
   m.detonated = detonated != 0;
   m.killed = killed != 0;
+  return m;
+}
+
+// --- FireSolution -------------------------------------------------------------
+
+void FireSolution::encode(Writer& w) const {
+  w.u32(tick);
+  w.u16(track_id);
+  w.u8(valid ? 1 : 0);
+  w.i24(quantize_position(pip_x));
+  w.i24(quantize_position(pip_y));
+  w.i24(quantize_position(pip_z));
+  w.f32(time_of_flight_s);
+  w.f32(dispersion_radius_m);
+}
+
+std::optional<FireSolution> FireSolution::decode(Reader& r) {
+  FireSolution m;
+  m.tick = r.u32();
+  m.track_id = r.u16();
+  const std::uint8_t valid = r.u8();
+  m.pip_x = dequantize_position(r.i24());
+  m.pip_y = dequantize_position(r.i24());
+  m.pip_z = dequantize_position(r.i24());
+  m.time_of_flight_s = r.f32();
+  m.dispersion_radius_m = r.f32();
+  if (!r.ok() || valid > 1) {
+    return std::nullopt;
+  }
+  m.valid = valid != 0;
   return m;
 }
 
@@ -303,6 +347,8 @@ std::optional<DataMessage> decode_data_message(MsgType type, std::span<const std
       return decode_data_as<Snapshot>(r);
     case MsgType::kEngagementEvent:
       return decode_data_as<EngagementEvent>(r);
+    case MsgType::kFireSolution:
+      return decode_data_as<FireSolution>(r);
     default:
       return std::nullopt;
   }

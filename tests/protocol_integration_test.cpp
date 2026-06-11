@@ -116,7 +116,7 @@ class ProtocolIntegrationTest : public ::testing::Test {
       const tools::DummyClientReport& report) {
     std::multiset<std::tuple<std::uint8_t, std::uint16_t>> set;
     for (const auto& event : report.events) {
-      set.emplace(static_cast<std::uint8_t>(event.kind), event.rocket_id);
+      set.emplace(static_cast<std::uint8_t>(event.kind), event.subject_id);
     }
     return set;
   }
