@@ -43,6 +43,7 @@ endif()
 # and later the UE5 client module without dragging net/sim along.
 add_library(seashield_protocol STATIC
   protocol/messages.cpp
+  protocol/reliable.cpp
 )
 target_include_directories(seashield_protocol PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
@@ -96,6 +97,7 @@ if(SEASHIELD_BUILD_TESTS)
     tests/math_test.cpp
     tests/messages_test.cpp
     tests/pcg32_test.cpp
+    tests/reliable_test.cpp
     tests/scenario_test.cpp
     tests/send_queue_test.cpp
     tests/target_test.cpp
