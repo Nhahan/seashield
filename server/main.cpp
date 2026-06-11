@@ -1,20 +1,29 @@
-// SeaShield P1 demo server: framed TCP echo/broadcast + UDP echo.
+// SeaShield server.
 //
-//   seashield_server [--port 7777] [--udp-port 7778] [--mode broadcast|echo]
+// Simulation mode (P3): authoritative engagement server — TCP control channel
+// (handshake/roles/fire commands) + UDP snapshot/event fan-out at 30Hz over a
+// 60Hz fixed-tick world.
+//
+//   seashield_server --scenario scenarios/crossing-asm.scn
+//                    [--port 7777] [--udp-port 7778] [--journal out.journal]
 //                    [--send-cap 262144] [--max-clients 64] [--verbose]
 //
-// Demonstrates the P1 DoD: N concurrent clients on one authoritative loop,
-// with slow clients evicted via the per-session send-queue cap (charter §4.8).
+// Echo mode (P1 demo, preserved): framed TCP echo/broadcast + UDP echo,
+// demonstrating N concurrent clients with slow-client eviction (charter §4.8).
+//
+//   seashield_server [--port 7777] [--udp-port 7778] [--mode broadcast|echo]
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
+#include <chrono>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <span>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -25,6 +34,8 @@
 #include "net/socket_util.h"
 #include "net/tcp_session.h"
 #include "net/udp_endpoint.h"
+#include "server/sim_server.h"
+#include "sim/scenario.h"
 
 namespace {
 
@@ -38,6 +49,8 @@ struct Options {
   std::size_t send_cap = 256 * 1024;
   std::size_t max_clients = 64;
   bool verbose = false;
+  std::string scenario_path;  // Non-empty selects simulation mode.
+  std::string journal_path;
 };
 
 bool parse_args(int argc, char** argv, Options& opts) {
@@ -76,6 +89,12 @@ bool parse_args(int argc, char** argv, Options& opts) {
       const long v = next_value(1, 4096);
       if (v < 0) return false;
       opts.max_clients = static_cast<std::size_t>(v);
+    } else if (arg == "--scenario") {
+      if (i + 1 >= argc) return false;
+      opts.scenario_path = argv[++i];
+    } else if (arg == "--journal") {
+      if (i + 1 >= argc) return false;
+      opts.journal_path = argv[++i];
     } else if (arg == "--verbose") {
       opts.verbose = true;
     } else {
@@ -83,6 +102,38 @@ bool parse_args(int argc, char** argv, Options& opts) {
     }
   }
   return true;
+}
+
+int run_sim_mode(const Options& opts) {
+  std::string error;
+  const auto scenario = seashield::sim::load_scenario_file(opts.scenario_path, &error);
+  if (!scenario) {
+    SS_LOG_ERROR("failed to load scenario %s: %s", opts.scenario_path.c_str(), error.c_str());
+    return 1;
+  }
+  seashield::server::SimServerConfig config;
+  config.tcp_port = opts.port;
+  config.udp_port = opts.udp_port;
+  config.send_cap = opts.send_cap;
+  config.max_clients = opts.max_clients;
+  config.scenario = *scenario;
+  config.journal_path = opts.journal_path;
+
+  seashield::server::SimServer server(config);
+  if (!server.start()) {
+    SS_LOG_ERROR("failed to start sim server on tcp=%u/udp=%u", opts.port, opts.udp_port);
+    return 1;
+  }
+  while (g_stop == 0) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  server.stop();
+  SS_LOG_INFO("sim server stopped: ticks=%llu snapshots=%llu events=%llu commands=%llu",
+              static_cast<unsigned long long>(server.stats().ticks.load()),
+              static_cast<unsigned long long>(server.stats().snapshot_batches_sent.load()),
+              static_cast<unsigned long long>(server.stats().events_sent.load()),
+              static_cast<unsigned long long>(server.stats().commands_accepted.load()));
+  return 0;
 }
 
 class Server {
@@ -176,8 +227,8 @@ int main(int argc, char** argv) {
   Options opts;
   if (!parse_args(argc, argv, opts)) {
     std::fprintf(stderr,
-                 "usage: %s [--port N] [--udp-port N] [--mode broadcast|echo] "
-                 "[--send-cap BYTES] [--max-clients N] [--verbose]\n",
+                 "usage: %s [--scenario FILE] [--journal FILE] [--port N] [--udp-port N] "
+                 "[--mode broadcast|echo] [--send-cap BYTES] [--max-clients N] [--verbose]\n",
                  argv[0]);
     return 2;
   }
@@ -188,6 +239,10 @@ int main(int argc, char** argv) {
   seashield::net::ignore_sigpipe();
   std::signal(SIGINT, handle_signal);
   std::signal(SIGTERM, handle_signal);
+
+  if (!opts.scenario_path.empty()) {
+    return run_sim_mode(opts);
+  }
 
   auto loop = seashield::net::EventLoop::create();
   if (!loop) {
