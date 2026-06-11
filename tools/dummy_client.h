@@ -26,6 +26,10 @@ struct DummyClientConfig {
   // >= 0: send one FireRequest this long after the UDP bind completes
   // (requires weapons/solo role server-side).
   double fire_after_s = -1.0;
+  // With fire_at_track, the request designates the first CONFIRMED track seen
+  // in snapshots (fire.track_id is filled in; fire.az/el become operator
+  // offsets). The send is deferred until such a track exists.
+  bool fire_at_track = false;
   protocol::FireRequest fire;
   double keepalive_interval_s = 0.1;  // 10Hz: carries acks for reliable events.
   double udp_hello_interval_s = 0.2;
@@ -55,6 +59,13 @@ struct DummyClientReport {
   // Application-level double check on top of the reliable layer's dedup: a
   // (kind, subject_id, tick) triple arriving twice means exactly-once broke.
   bool duplicate_event = false;
+
+  // Track stream statistics (P4): what the console's PPI would have drawn.
+  std::uint64_t track_records_seen = 0;
+  std::uint8_t max_track_state_seen = 0;  // 0 tentative, 1 confirmed, 2 coasting.
+  std::uint16_t last_track_count = 0;     // kTrack records in the latest batch.
+  double last_track_sigma_m = 0.0;        // Dequantized quality of the last track.
+  std::uint16_t designated_track_id = 0;  // Track fired upon (fire_at_track).
 };
 
 class DummyClient {

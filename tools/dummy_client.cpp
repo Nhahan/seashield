@@ -158,6 +158,7 @@ DummyClientReport DummyClient::run() {
   };
 
   std::set<std::tuple<std::uint8_t, std::uint16_t, std::uint32_t>> seen_events;
+  std::uint16_t confirmed_track_seen = 0;
   const auto on_message = [&](protocol::MsgType type, std::span<const std::uint8_t> payload) {
     const auto message = protocol::decode_data_message(type, payload);
     if (!message) {
@@ -173,6 +174,20 @@ DummyClientReport DummyClient::run() {
       }
       report.last_total_entities = snap->total_entities;
       report.last_phase = snap->phase;
+      std::uint16_t batch_tracks = 0;
+      for (const protocol::EntityRecord& entity : snap->entities) {
+        if (entity.kind != protocol::EntityKind::kTrack) {
+          continue;
+        }
+        ++report.track_records_seen;
+        ++batch_tracks;
+        report.max_track_state_seen = std::max(report.max_track_state_seen, entity.state);
+        report.last_track_sigma_m = protocol::dequantize_track_sigma(entity.flags);
+        if (entity.state >= 1 && confirmed_track_seen == 0) {
+          confirmed_track_seen = entity.id;  // First confirmed track: fire target.
+        }
+      }
+      report.last_track_count = batch_tracks;
     } else if (const auto* event = std::get_if<protocol::EngagementEvent>(&*message)) {
       const auto key = std::make_tuple(static_cast<std::uint8_t>(event->kind), event->subject_id,
                                        event->tick);
@@ -225,9 +240,15 @@ DummyClientReport DummyClient::run() {
       endpoint.send_unreliable(protocol::MsgType::kKeepalive, {});
       next_keepalive = now + config_.keepalive_interval_s;
     }
-    if (!fired && config_.fire_after_s >= 0.0 && now - run_started >= config_.fire_after_s) {
+    if (!fired && config_.fire_after_s >= 0.0 && now - run_started >= config_.fire_after_s &&
+        (!config_.fire_at_track || confirmed_track_seen != 0)) {
       fired = true;
-      if (!send_control_frame(tcp.get(), protocol::encode_control_frame(config_.fire))) {
+      protocol::FireRequest fire = config_.fire;
+      if (config_.fire_at_track) {
+        fire.track_id = confirmed_track_seen;  // az/el ride along as offsets.
+        report.designated_track_id = confirmed_track_seen;
+      }
+      if (!send_control_frame(tcp.get(), protocol::encode_control_frame(fire))) {
         report.disconnected_early = true;
         break;
       }
