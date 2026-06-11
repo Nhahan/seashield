@@ -110,6 +110,7 @@ if(SEASHIELD_BUILD_TESTS)
     tests/reliable_test.cpp
     tests/scenario_test.cpp
     tests/send_queue_test.cpp
+    tests/spsc_queue_test.cpp
     tests/target_test.cpp
     tests/unique_fd_test.cpp
     tests/wire_test.cpp
