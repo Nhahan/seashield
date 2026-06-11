@@ -151,7 +151,10 @@ TEST_F(ProtocolIntegrationTest, SnapshotsFlowToEveryRole) {
     EXPECT_FALSE(report.disconnected_early);
     // 1.5s at 30Hz is ~45 distinct ticks; demand a conservative majority.
     EXPECT_GE(report.snapshot_ticks, 20u);
-    EXPECT_EQ(report.last_total_entities, 1u);  // Target only before any fire.
+    // Target plus at most one track of it (the tracker may or may not have
+    // initiated within 1.5 s at the default 2 s scan period).
+    EXPECT_GE(report.last_total_entities, 1u);
+    EXPECT_LE(report.last_total_entities, 2u);
     EXPECT_FALSE(report.weather_summary.empty());
     EXPECT_EQ(report.last_phase, protocol::EngagementPhase::kRunning);
   }
@@ -260,6 +263,133 @@ TEST_F(ProtocolIntegrationTest, TokenReconnectRestoresRoleAndBadTokenIsRejected)
   const auto bogus_report = bogus_client.run();
   EXPECT_TRUE(bogus_report.rejected);
   EXPECT_EQ(bogus_report.reject_reason, protocol::RejectReason::kBadToken);
+}
+
+// P4: the estimate stream — every console receives kTrack records (with the
+// quality byte) and the confirmed/lost lifecycle events exactly once.
+TEST_F(ProtocolIntegrationTest, TrackStreamReachesEveryConsole) {
+  start_server([](server::SimServerConfig& config) {
+    config.scenario.config.radar.scan_period_s = 0.5;  // Confirm within ~1.5 s.
+  });
+  tools::DummyClientConfig observer;
+  observer.role = protocol::Role::kObserver;
+  observer.duration_s = 4.0;
+  tools::DummyClientConfig commander = observer;
+  commander.role = protocol::Role::kCommander;
+
+  const auto reports = run_clients({observer, commander});
+  for (const auto& report : reports) {
+    ASSERT_TRUE(report.welcomed) << report.error;
+    EXPECT_FALSE(report.duplicate_event);
+    EXPECT_GT(report.track_records_seen, 0u) << "no kTrack records in any snapshot";
+    EXPECT_GE(report.max_track_state_seen, 1u) << "track never seen confirmed";
+    EXPECT_GT(report.last_track_sigma_m, 0.0);
+    EXPECT_EQ(count_kind(report, protocol::EventKind::kTrackConfirmed), 1u);
+  }
+  EXPECT_EQ(event_multiset(reports[0]), event_multiset(reports[1]));
+}
+
+// P4: the operator designates a track instead of aiming manually; the SIM
+// thread resolves the solution and the journal records the absolute command.
+TEST_F(ProtocolIntegrationTest, TrackDesignatedFireLaunchesASalvo) {
+  start_server([](server::SimServerConfig& config) {
+    config.scenario.config.radar.scan_period_s = 0.5;
+    // The shared scenario shortens rocket lifetime to 6 s for fast splash
+    // adjudication — but this geometry needs an 8 s time of flight, and the
+    // solver (correctly) finds no solution a dead rocket can fly. Restore it.
+    config.scenario.config.rocket.max_lifetime_s = 40.0;
+  });
+  tools::DummyClientConfig weapons;
+  weapons.role = protocol::Role::kWeapons;
+  weapons.duration_s = 10.0;
+  // Confirmation lands ~1.5 s in; the extra wait lets the velocity estimate
+  // settle — a freshly confirmed track of a closing target can fail the PIP
+  // fixed point outright (the same effect the sandbox --settle-s knob covers).
+  weapons.fire_after_s = 3.5;
+  weapons.fire_at_track = true;
+  weapons.fire.salvo_count = 4;
+  weapons.fire.dispersion_mrad = 3.0;
+  weapons.fire.azimuth_rad = 0.0;  // No operator trim.
+  weapons.fire.elevation_rad = 0.0;
+
+  tools::DummyClient client(with_ports(weapons));
+  const auto report = client.run();
+  ASSERT_TRUE(report.welcomed) << report.error;
+  EXPECT_NE(report.designated_track_id, 0u);
+  EXPECT_EQ(count_kind(report, protocol::EventKind::kLaunch), 4u)
+      << "designated fire did not launch";
+  EXPECT_EQ(server_->stats().commands_accepted.load(), 1u);
+  EXPECT_EQ(server_->stats().track_solution_failures.load(), 0u);
+
+  // The journal holds the RESOLVED absolute command — replays never re-solve.
+  server_->stop();
+  const auto journal = sim::Journal::parse(server_->journal_text());
+  ASSERT_TRUE(journal.has_value());
+  ASSERT_EQ(journal->entries().size(), 1u);
+  EXPECT_EQ(journal->entries()[0].command.salvo_count, 4);
+  EXPECT_GT(journal->entries()[0].command.elevation_rad, 0.0);
+}
+
+// §5.8 관측석 복기: a second server in --replay mode re-runs the recorded
+// engagement and streams it; live fire is refused.
+TEST_F(ProtocolIntegrationTest, ReplayModeStreamsTheRecordedEngagement) {
+  start_server();
+  auto weapons = low_splash_fire(4.0);
+  tools::DummyClient live_client(with_ports(weapons));
+  const auto live_report = live_client.run();
+  ASSERT_TRUE(live_report.welcomed) << live_report.error;
+  ASSERT_EQ(count_kind(live_report, protocol::EventKind::kLaunch), 4u);
+  server_->stop();
+  const std::string journal_text = server_->journal_text();
+  ASSERT_FALSE(journal_text.empty());
+
+  std::string error;
+  const auto scenario = sim::load_scenario_text(kScenarioText, &error);
+  ASSERT_TRUE(scenario.has_value()) << error;
+  server::SimServerConfig replay_config;
+  replay_config.tcp_port = 0;
+  replay_config.udp_port = 0;
+  replay_config.scenario = *scenario;
+  replay_config.replay_journal_text = journal_text;
+  server::SimServer replay_server(replay_config);
+  ASSERT_TRUE(replay_server.start());
+
+  // An observer reviews the replay; a weapons console tries to interfere.
+  tools::DummyClientConfig observer;
+  observer.role = protocol::Role::kObserver;
+  observer.duration_s = 4.0;
+  observer.tcp_port = replay_server.tcp_port();
+  tools::DummyClientConfig meddler;
+  meddler.role = protocol::Role::kWeapons;
+  meddler.duration_s = 4.0;
+  meddler.fire_after_s = 1.0;
+  meddler.tcp_port = replay_server.tcp_port();
+  meddler.fire.azimuth_rad = math::deg_to_rad(45.0);
+  meddler.fire.elevation_rad = math::deg_to_rad(10.0);
+
+  std::vector<tools::DummyClientReport> replay_reports(2);
+  std::thread t1([&] {
+    tools::DummyClient c(observer);
+    replay_reports[0] = c.run();
+  });
+  std::thread t2([&] {
+    tools::DummyClient c(meddler);
+    replay_reports[1] = c.run();
+  });
+  t1.join();
+  t2.join();
+  replay_server.stop();
+
+  for (const auto& report : replay_reports) {
+    ASSERT_TRUE(report.welcomed) << report.error;
+    EXPECT_FALSE(report.duplicate_event);
+    // The replayed engagement streams the SAME salvo to the review consoles.
+    EXPECT_EQ(count_kind(report, protocol::EventKind::kLaunch), 4u);
+    EXPECT_EQ(count_kind(report, protocol::EventKind::kRocketResolved), 4u);
+  }
+  // The meddler's live fire was refused: nothing was accepted or journaled.
+  EXPECT_EQ(replay_server.stats().commands_accepted.load(), 0u);
+  EXPECT_GE(replay_server.stats().commands_rejected.load(), 1u);
 }
 
 // A console that binds UDP and then never acknowledges anything (process

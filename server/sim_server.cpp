@@ -35,6 +35,18 @@ bool valid_fire_request(const protocol::FireRequest& fire) {
          fire.launch_interval_s <= 1.0;
 }
 
+// Track-designation trim limits (see handle_fire).
+bool valid_fire_offsets(const protocol::FireRequest& fire) {
+  const double limit = math::deg_to_rad(15.0);
+  return std::isfinite(fire.azimuth_rad) && std::isfinite(fire.elevation_rad) &&
+         fire.azimuth_rad >= -limit && fire.azimuth_rad <= limit &&
+         fire.elevation_rad >= -limit && fire.elevation_rad <= limit &&
+         fire.salvo_count >= 1 && fire.salvo_count <= 64 && std::isfinite(fire.dispersion_mrad) &&
+         fire.dispersion_mrad >= 0.0 && fire.dispersion_mrad <= 50.0 &&
+         std::isfinite(fire.launch_interval_s) && fire.launch_interval_s >= 0.0 &&
+         fire.launch_interval_s <= 1.0;
+}
+
 std::uint64_t random_seed() {
   std::random_device rd;
   return (static_cast<std::uint64_t>(rd()) << 32) | rd();
@@ -60,6 +72,13 @@ bool SimServer::start() {
     return false;
   }
   start_time_ = steady_clock::now();
+  if (!config_.replay_journal_text.empty()) {
+    replay_journal_ = sim::Journal::parse(config_.replay_journal_text);
+    if (!replay_journal_.has_value()) {
+      SS_LOG_ERROR("replay journal failed to parse");
+      return false;
+    }
+  }
   loop_ = net::EventLoop::create();
   if (!loop_) {
     return false;
@@ -401,9 +420,19 @@ void SimServer::handle_fire(net::TcpSession& transport, const protocol::FireRequ
     return;
   }
   const LogicalSession& session = sessions_.at(attachment->second);
+  if (replay_journal_.has_value()) {
+    stats_.commands_rejected.fetch_add(1);
+    SS_LOG_WARN("session %llx: fire request refused — replay mode",
+                static_cast<unsigned long long>(session.token));
+    return;
+  }
   const bool may_fire =
       session.role == protocol::Role::kWeapons || session.role == protocol::Role::kSolo;
-  if (!may_fire || !valid_fire_request(fire)) {
+  // Track-designated fire reinterprets az/el as operator trim on the
+  // server-computed solution: bounded to ±15° (anything larger is not a
+  // correction, it is a different shot — fire manually instead).
+  const bool valid = fire.track_id != 0 ? valid_fire_offsets(fire) : valid_fire_request(fire);
+  if (!may_fire || !valid) {
     stats_.commands_rejected.fetch_add(1);
     SS_LOG_WARN("session %llx: fire request rejected (%s)",
                 static_cast<unsigned long long>(session.token),
@@ -411,6 +440,7 @@ void SimServer::handle_fire(net::TcpSession& transport, const protocol::FireRequ
     return;
   }
   SimCommand command;
+  command.track_id = fire.track_id;
   command.fire.azimuth_rad = fire.azimuth_rad;
   command.fire.elevation_rad = fire.elevation_rad;
   command.fire.salvo_count = fire.salvo_count;
@@ -511,17 +541,40 @@ void SimServer::sim_thread_main() {
 
   std::size_t seen_results = 0;
   std::size_t seen_rockets = 0;
+  std::size_t seen_track_events = 0;
+  std::size_t replay_cursor = 0;
   bool target_destroyed_sent = false;
   bool end_sent = false;
   std::uint64_t cadence = 0;
   auto next_tick_at = steady_clock::now();
 
   while (sim_running_.load()) {
-    // 1. Inputs: drain, journal, queue — order fixed (charter §4.6).
+    // 1. Inputs: drain, journal, queue — order fixed (charter §4.6). In
+    //    replay mode the parsed journal IS the input stream, applied at its
+    //    recorded ticks (live fire was already refused on the I/O thread).
+    if (replay_journal_.has_value()) {
+      while (replay_cursor < replay_journal_->entries().size() &&
+             replay_journal_->entries()[replay_cursor].tick == world.tick()) {
+        world.queue_fire(replay_journal_->entries()[replay_cursor].command);
+        ++replay_cursor;
+      }
+    }
     SimCommand command;
     while (net_to_sim_.pop(command)) {
-      journal_.record(world.tick(), command.fire);
-      world.queue_fire(command.fire);
+      sim::FireCommand fire = command.fire;
+      if (command.track_id != 0) {
+        // Resolve the designated track HERE: the tracker belongs to this
+        // thread. az/el arrived as operator trim on the solution.
+        const auto solution = world.solve_for_track(command.track_id);
+        if (!solution.has_value()) {
+          stats_.track_solution_failures.fetch_add(1);
+          continue;
+        }
+        fire.azimuth_rad = solution->azimuth_rad + command.fire.azimuth_rad;
+        fire.elevation_rad = solution->elevation_rad + command.fire.elevation_rad;
+      }
+      journal_.record(world.tick(), fire);
+      world.queue_fire(fire);
     }
 
     const auto work_started = steady_clock::now();
@@ -557,6 +610,22 @@ void SimServer::sim_thread_main() {
       event.miss_distance_m = static_cast<float>(result.miss_distance_m);
       event.detonated = result.detonated;
       event.killed = result.killed;
+      output.events.push_back(event);
+    }
+    const auto& world_track_events = world.track_events();
+    for (; seen_track_events < world_track_events.size(); ++seen_track_events) {
+      const sim::TrackEvent& track_event = world_track_events[seen_track_events];
+      // Initiations stay off the wire: the snapshot's tentative records
+      // already show them (protocol/messages.h EventKind note).
+      if (track_event.kind == sim::TrackEvent::Kind::kInitiated) {
+        continue;
+      }
+      protocol::EngagementEvent event;
+      event.tick = static_cast<std::uint32_t>(track_event.tick);
+      event.kind = track_event.kind == sim::TrackEvent::Kind::kConfirmed
+                       ? protocol::EventKind::kTrackConfirmed
+                       : protocol::EventKind::kTrackLost;
+      event.subject_id = static_cast<std::uint16_t>(track_event.track_id);
       output.events.push_back(event);
     }
     if (!target_destroyed_sent && world.target().destroyed()) {
@@ -607,6 +676,25 @@ void SimServer::sim_thread_main() {
         record.vel_x = rocket.state.velocity.x;
         record.vel_y = rocket.state.velocity.y;
         record.vel_z = rocket.state.velocity.z;
+        output.entities.push_back(record);
+      }
+      // The estimate stream (what consoles actually plot, charter §5.5):
+      // tracks ride the same snapshot with their quality in the flags byte.
+      for (const sim::Track& track : world.tracker().tracks()) {
+        protocol::EntityRecord record;
+        record.id = static_cast<std::uint16_t>(track.id);
+        record.kind = protocol::EntityKind::kTrack;
+        record.state = track.coasting() ? 2 : static_cast<std::uint8_t>(track.status);
+        record.flags =
+            protocol::quantize_track_sigma(std::sqrt(track.filter.position_variance()));
+        const math::Vec3 estimate_pos = track.position();
+        const math::Vec3 estimate_vel = track.velocity();
+        record.pos_x = estimate_pos.x;
+        record.pos_y = estimate_pos.y;
+        record.pos_z = estimate_pos.z;
+        record.vel_x = estimate_vel.x;
+        record.vel_y = estimate_vel.y;
+        record.vel_z = estimate_vel.z;
         output.entities.push_back(record);
       }
     }

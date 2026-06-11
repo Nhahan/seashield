@@ -20,8 +20,10 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <span>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -51,6 +53,7 @@ struct Options {
   bool verbose = false;
   std::string scenario_path;  // Non-empty selects simulation mode.
   std::string journal_path;
+  std::string replay_path;  // Non-empty: drive the sim from this journal.
 };
 
 bool parse_args(int argc, char** argv, Options& opts) {
@@ -95,6 +98,9 @@ bool parse_args(int argc, char** argv, Options& opts) {
     } else if (arg == "--journal") {
       if (i + 1 >= argc) return false;
       opts.journal_path = argv[++i];
+    } else if (arg == "--replay") {
+      if (i + 1 >= argc) return false;
+      opts.replay_path = argv[++i];
     } else if (arg == "--verbose") {
       opts.verbose = true;
     } else {
@@ -118,6 +124,17 @@ int run_sim_mode(const Options& opts) {
   config.max_clients = opts.max_clients;
   config.scenario = *scenario;
   config.journal_path = opts.journal_path;
+  if (!opts.replay_path.empty()) {
+    std::ifstream in(opts.replay_path);
+    if (!in.is_open()) {
+      SS_LOG_ERROR("cannot open replay journal %s", opts.replay_path.c_str());
+      return 1;
+    }
+    std::ostringstream buffer;
+    buffer << in.rdbuf();
+    config.replay_journal_text = buffer.str();
+    SS_LOG_INFO("replay mode: %s", opts.replay_path.c_str());
+  }
 
   seashield::server::SimServer server(config);
   if (!server.start()) {
@@ -227,7 +244,7 @@ int main(int argc, char** argv) {
   Options opts;
   if (!parse_args(argc, argv, opts)) {
     std::fprintf(stderr,
-                 "usage: %s [--scenario FILE] [--journal FILE] [--port N] [--udp-port N] "
+                 "usage: %s [--scenario FILE] [--journal FILE] [--replay FILE] [--port N] [--udp-port N] "
                  "[--mode broadcast|echo] [--send-cap BYTES] [--max-clients N] [--verbose]\n",
                  argv[0]);
     return 2;

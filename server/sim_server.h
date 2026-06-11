@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <thread>
@@ -49,6 +50,10 @@ struct SimServerConfig {
   double reliable_peer_timeout_s = 10.0;
   sim::Scenario scenario;
   std::string journal_path;  // Non-empty: dump the input journal on stop().
+  // Non-empty: REPLAY mode (charter §5.8) — the journal text drives the sim
+  // at its recorded ticks, live fire requests are refused, and snapshots/
+  // events stream as usual so observer consoles can review the engagement.
+  std::string replay_journal_text;
 };
 
 // Counters are atomics so tests can observe progress from outside the I/O
@@ -59,6 +64,9 @@ struct SimServerStats {
   std::atomic<std::uint64_t> events_sent{0};
   std::atomic<std::uint64_t> commands_accepted{0};
   std::atomic<std::uint64_t> commands_rejected{0};
+  // Track-designated fire whose solve failed (no/unconfirmed track, solver
+  // divergence) — counted on the sim thread, surfaced for tests/monitoring.
+  std::atomic<std::uint64_t> track_solution_failures{0};
   std::atomic<std::uint64_t> sim_output_dropped{0};
   std::atomic<std::uint64_t> udp_unbound_timeouts{0};
   std::atomic<std::uint64_t> sessions_created{0};
@@ -91,9 +99,14 @@ class SimServer {
   std::string journal_text() const;
 
  private:
-  // net -> sim: validated operator inputs.
+  // net -> sim: validated operator inputs. track_id != 0 designates a track:
+  // the SIM thread resolves the solution (the tracker is its state — touching
+  // it from the I/O thread would be a data race) and fire.az/el ride along as
+  // operator offsets. The journal records the RESOLVED absolute command, so
+  // replays never re-solve (charter §5.8: 저널은 명령을 기록한다).
   struct SimCommand {
     sim::FireCommand fire;
+    std::uint16_t track_id = 0;
   };
 
   // sim -> net: one tick's outbound bundle.
@@ -171,6 +184,7 @@ class SimServer {
   // Simulation-thread state. journal_ is written by the sim thread only and
   // read via journal_text() after both threads are joined.
   sim::Journal journal_;
+  std::optional<sim::Journal> replay_journal_;  // Parsed in start(), sim-thread read.
 
   // The two SPSC bridges (charter §4.6).
   SpscQueue<SimCommand> net_to_sim_{1024};
