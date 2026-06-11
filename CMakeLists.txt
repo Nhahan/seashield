@@ -55,6 +55,7 @@ add_library(seashield_core STATIC
   sim/journal.cpp
   sim/radar.cpp
   sim/scenario.cpp
+  sim/tracking.cpp
   sim/world.cpp
   net/acceptor.cpp
   net/event_loop.cpp
@@ -121,6 +122,7 @@ if(SEASHIELD_BUILD_TESTS)
     tests/send_queue_test.cpp
     tests/spsc_queue_test.cpp
     tests/target_test.cpp
+    tests/tracking_test.cpp
     tests/unique_fd_test.cpp
     tests/wire_test.cpp
     tests/world_test.cpp
