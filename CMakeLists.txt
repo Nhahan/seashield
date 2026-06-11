@@ -37,6 +37,15 @@ else()
   message(FATAL_ERROR "Unsupported platform: SeaShield requires kqueue or epoll")
 endif()
 
+# Shared protocol core (charter §4.1 "프로토콜 코어의 공유"): wire format,
+# message catalogue, reliable-UDP channel logic. Depends on the standard
+# library only, so the same archive links into the server, the dummy client,
+# and later the UE5 client module without dragging net/sim along.
+add_library(seashield_protocol STATIC
+  protocol/messages.cpp
+)
+target_include_directories(seashield_protocol PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
 add_library(seashield_core STATIC
   core/logger.cpp
   sim/ballistics.cpp
@@ -85,14 +94,16 @@ if(SEASHIELD_BUILD_TESTS)
     tests/frame_parser_test.cpp
     tests/integration_test.cpp
     tests/math_test.cpp
+    tests/messages_test.cpp
     tests/pcg32_test.cpp
     tests/scenario_test.cpp
     tests/send_queue_test.cpp
     tests/target_test.cpp
     tests/unique_fd_test.cpp
+    tests/wire_test.cpp
     tests/world_test.cpp
   )
-  target_link_libraries(seashield_tests PRIVATE seashield_core GTest::gtest_main)
+  target_link_libraries(seashield_tests PRIVATE seashield_core seashield_protocol GTest::gtest_main)
   target_compile_definitions(seashield_tests
     PRIVATE SEASHIELD_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
