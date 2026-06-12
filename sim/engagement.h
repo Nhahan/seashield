@@ -42,7 +42,12 @@ struct RocketResult {
   std::uint32_t rocket_id = 0;
   double miss_distance_m = 0.0;  // Best (smallest) over the whole flight.
   bool detonated = false;        // Came within fuze radius.
-  bool killed = false;           // Pk roll succeeded.
+  bool killed = false;           // Pk roll succeeded AND the target was alive.
+  // Pk roll outcome regardless of the one-kill-per-engagement cap: the fuze
+  // does not know the target died, so every passage rolls. This is the
+  // uncapped per-rocket kill metric the experiment report's independence
+  // analysis needs (보고서 §5).
+  bool would_kill = false;
   std::uint64_t end_tick = 0;
 };
 

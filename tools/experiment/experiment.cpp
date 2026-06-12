@@ -51,6 +51,8 @@ bool apply_axis_value(CellParams& cell, const std::string& name, double value) {
   sim::WorldConfig& cfg = cell.scenario.config;
   if (name == "range") {
     // Inbound geometry: the target starts due north at this ground range.
+    // The axis deliberately implies a due-south inbound course; combining it
+    // with a heading-style axis would silently depend on axis order.
     cfg.target.initial_position = {0.0, value, cfg.target.initial_position.z};
     cfg.target.heading_rad = math::deg_to_rad(180.0);
     return true;
@@ -200,6 +202,7 @@ std::vector<RunRow> run_engagement(const CellParams& cell, bool solver_track, in
     row.miss_m = result.miss_distance_m;
     row.detonated = result.detonated;
     row.killed = result.killed;
+    row.would_kill = result.would_kill;
     row.salvo_killed = salvo_killed;
     rows.push_back(row);
   }

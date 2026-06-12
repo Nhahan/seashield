@@ -58,7 +58,9 @@ void Target::step(double dt_s) {
   if (weave_started_) {
     // Cosine, not sine: the HEADING is the integral of the turn rate, and
     // ∫cos = sin oscillates symmetrically around the base course, whereas
-    // ∫sin = 1−cos would push the whole course off to one side.
+    // ∫sin = 1−cos would push the whole course off to one side. cos(0) = 1
+    // means the weave opens at full turn rate — an idealized step-onset
+    // evasive break rather than a ramped one.
     turn_rate += params_.weave_turn_rate_rad_s *
                  math::cos(math::kTwoPi * weave_elapsed_s_ / params_.weave_period_s);
     weave_elapsed_s_ += dt_s;

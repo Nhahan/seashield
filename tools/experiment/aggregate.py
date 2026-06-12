@@ -2,10 +2,15 @@
 """Aggregates fc_experiment CSV rows into per-cell statistics.
 
 Standard library only (csv/statistics/math) so it runs anywhere the repo
-builds. Output: a markdown table per (cell, solver) with intercept rate and
-its 95% Wilson interval, mean/median miss, kill-chain timing, and the
-independence-assumption prediction 1-(1-p1)^N for comparison against the
-measured salvo kill rate (charter §5.7).
+builds. Output: a markdown table per (cell, solver) with the salvo kill rate,
+a per-rocket KILL SHARE with its 95% Wilson interval, miss statistics
+(RMS/mean/median), and kill-chain timing (charter §5.7).
+
+Metric honesty note: the world adjudicates at most ONE kill per engagement
+(the first kill ends it), so for N>1 the per-rocket share equals
+salvo_rate/N by construction — it is a contribution metric, NOT an
+independent per-shot probability. Only N=1 cells measure the true per-shot
+p1 directly; independence comparisons must be built from an N=1 baseline.
 
 Usage: python3 tools/experiment/aggregate.py results.csv [--md out.md]
 """
@@ -42,7 +47,7 @@ def main() -> int:
         fields = reader.fieldnames or []
         fixed = {"solver", "rep", "sim_seed", "gust_seed", "first_track_tick", "confirm_tick",
                  "launch_tick", "track_error_at_launch_m", "solver_tof_s", "fired", "rocket_id",
-                 "miss_m", "detonated", "killed", "salvo_killed"}
+                 "miss_m", "detonated", "killed", "would_kill", "salvo_killed"}
         axis_names = [name for name in fields if name not in fixed]
         rows = list(reader)
     if not rows:
@@ -56,9 +61,9 @@ def main() -> int:
         cells[key].append(row)
 
     lines = []
-    header = axis_names + ["solver", "runs", "fired%", "rocket kill p1 [95% CI]",
-                           "salvo kill", "1-(1-p1)^N", "mean miss(m)", "median miss(m)",
-                           "track err@launch(m)", "confirm(s)", "launch(s)"]
+    header = axis_names + ["solver", "runs", "fired%", "true p1 [95% CI]",
+                           "kill share/rocket", "salvo kill", "rms miss(m)", "mean miss(m)",
+                           "median miss(m)", "track err@launch(m)", "confirm(s)", "launch(s)"]
     lines.append("| " + " | ".join(header) + " |")
     lines.append("|" + "---|" * len(header))
 
@@ -72,14 +77,17 @@ def main() -> int:
 
         fired_rockets = [r for r in rocket_rows if r["fired"] == "1" and r["rocket_id"] != "0"]
         kills = sum(1 for r in fired_rockets if r["killed"] == "1")
-        p1, lo, hi = wilson(kills, len(fired_rockets))
+        p1, _, _ = wilson(kills, len(fired_rockets))
+        # would_kill is the UNCAPPED per-rocket Pk outcome (v4 sim change):
+        # the true per-shot probability, valid at any salvo size.
+        would_kills = sum(1 for r in fired_rockets if r.get("would_kill") == "1")
+        true_p1, lo, hi = wilson(would_kills, len(fired_rockets))
         salvo_kills = sum(1 for rep_rowss in runs.values()
                           if any(r["salvo_killed"] == "1" for r in rep_rowss))
         salvo_rate = salvo_kills / n_runs if n_runs else 0.0
-        salvo_n = max((len(rep_rows) for rep_rows in runs.values()), default=0)
-        independent = 1.0 - (1.0 - p1) ** salvo_n if salvo_n else 0.0
 
         misses = [float(r["miss_m"]) for r in fired_rockets]
+        rms_miss = math.sqrt(sum(m * m for m in misses) / len(misses)) if misses else 0.0
         track_errs = [float(r["track_error_at_launch_m"]) for r in fired_rockets
                       if r["solver"] == "track"]
         confirms = [float(r["confirm_tick"]) * TICK_S for r in fired_rockets
@@ -94,9 +102,10 @@ def main() -> int:
                 solver,
                 str(n_runs),
                 f"{100.0 * fired_runs / n_runs:.0f}%" if n_runs else "-",
-                f"{p1:.3f} [{lo:.3f}, {hi:.3f}]" if fired_rockets else "-",
+                f"{true_p1:.3f} [{lo:.3f}, {hi:.3f}]" if fired_rockets else "-",
+                f"{p1:.3f}" if fired_rockets else "-",
                 f"{salvo_rate:.3f}",
-                f"{independent:.3f}",
+                f"{rms_miss:.1f}" if misses else "-",
                 f"{statistics.fmean(misses):.1f}" if misses else "-",
                 f"{statistics.median(misses):.1f}" if misses else "-",
                 f"{statistics.fmean(track_errs):.1f}" if track_errs else "-",

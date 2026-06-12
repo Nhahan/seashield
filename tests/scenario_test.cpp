@@ -62,6 +62,25 @@ TEST(ScenarioTest, DefaultsApplyWhenOmitted) {
                    generated.sea_level_temperature_c);
 }
 
+TEST(ScenarioTest, FireSolutionAndCoastKeysParseAndValidate) {
+  std::string error;
+  const auto scenario = load_scenario_text(
+      "fire_solution_rate_hz = 4\ntrack_max_coast_scans = 1\n", &error);
+  ASSERT_TRUE(scenario.has_value()) << error;
+  EXPECT_DOUBLE_EQ(scenario->fire_solution_rate_hz, 4.0);
+  EXPECT_EQ(scenario->config.tracker.max_coast_scans, 1);
+
+  // Defaults: 2 Hz stream, gate at the second coasted scan.
+  const auto defaults = load_scenario_text("weather_seed = 5\n", nullptr);
+  ASSERT_TRUE(defaults.has_value());
+  EXPECT_DOUBLE_EQ(defaults->fire_solution_rate_hz, 2.0);
+  EXPECT_EQ(defaults->config.tracker.max_coast_scans, 2);
+
+  EXPECT_FALSE(load_scenario_text("fire_solution_rate_hz = -1\n", nullptr).has_value());
+  EXPECT_FALSE(load_scenario_text("fire_solution_rate_hz = 120\n", nullptr).has_value());
+  EXPECT_FALSE(load_scenario_text("track_max_coast_scans = 0\n", nullptr).has_value());
+}
+
 TEST(ScenarioTest, UnknownKeyIsRejected) {
   std::string error;
   EXPECT_FALSE(load_scenario_text("target_xx = 1\n", &error).has_value());

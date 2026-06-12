@@ -67,7 +67,8 @@ class Radar {
 
   // Pd(R) including the horizon cutoff — public so tests can pin the curve.
   // range_m is used for both SNR and horizon (slant ≈ ground at these
-  // geometries; the difference is second-order against σ_r).
+  // geometries; e.g. at 6 km / 300 m altitude the difference is ~7.5 m,
+  // well inside σ_r = 30 m).
   double detection_probability(double range_m, double target_alt_m) const;
   double horizon_range_m(double target_alt_m) const;
 

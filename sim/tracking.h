@@ -73,6 +73,11 @@ struct TrackerParams {
   int confirm_n = 5;
   int drop_after_misses = 3;  // Consecutive missed SCANS (not ticks).
   double init_velocity_sigma_mps = 400.0;
+  // A confirmed track that has coasted this many consecutive scans is too
+  // stale to aim with — the CV extrapolation error grows by scan_period ×
+  // velocity error per missed scan. solve_for_track refuses it (kStale).
+  // Values >= drop_after_misses disable the gate (the track drops first).
+  int max_coast_scans = 2;
 };
 
 struct Track {

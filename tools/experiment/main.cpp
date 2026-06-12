@@ -96,7 +96,7 @@ void write_row(std::ofstream& out, const CliOptions& opts, const RunRow& row) {
       << row.launch_tick << ',' << row.track_error_at_launch_m << ',' << row.solver_tof_s << ','
       << (row.fired ? 1 : 0) << ',' << row.rocket_id << ',' << row.miss_m << ','
       << (row.detonated ? 1 : 0) << ',' << (row.killed ? 1 : 0) << ','
-      << (row.salvo_killed ? 1 : 0) << '\n';
+      << (row.would_kill ? 1 : 0) << ',' << (row.salvo_killed ? 1 : 0) << '\n';
   (void)opts;
 }
 
@@ -147,7 +147,7 @@ int main(int argc, char** argv) {
   }
   csv << "solver,rep,sim_seed,gust_seed,first_track_tick,confirm_tick,launch_tick,"
          "track_error_at_launch_m,solver_tof_s,fired,rocket_id,miss_m,detonated,killed,"
-         "salvo_killed\n";
+         "would_kill,salvo_killed\n";
 
   // Cartesian grid over the axes (odometer indices).
   std::vector<std::size_t> index(opts.axes.size(), 0);

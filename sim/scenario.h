@@ -25,6 +25,14 @@ namespace seashield::sim {
 struct Scenario {
   std::uint64_t weather_seed = 1;
   double duration_s = 60.0;
+  // Server hint: stream FireSolution for confirmed tracks at this rate
+  // (key fire_solution_rate_hz, 0 = off). Low by design — one PIP solve
+  // integrates a full trajectory, so it must not ride the snapshot cadence.
+  double fire_solution_rate_hz = 2.0;
+  // Server hint: delta-compress snapshots for clients that ack (key
+  // snapshot_delta, default on). Full snapshots remain the fallback for
+  // silent/behind clients either way.
+  bool snapshot_delta = true;
   WorldConfig config;
 };
 

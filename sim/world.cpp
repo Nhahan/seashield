@@ -47,13 +47,14 @@ void World::launch(const ScheduledLaunch& launch) {
   rockets_.push_back(rocket);
 }
 
-void World::finish_rocket(Rocket& rocket, bool detonated, bool killed) {
+void World::finish_rocket(Rocket& rocket, bool detonated, bool killed, bool would_kill) {
   rocket.alive = false;
   RocketResult result;
   result.rocket_id = rocket.id;
   result.miss_distance_m = rocket.best_miss_m;
   result.detonated = detonated;
   result.killed = killed;
+  result.would_kill = would_kill;
   result.end_tick = tick_;
   results_.push_back(result);
 }
@@ -133,25 +134,34 @@ void World::step() {
     const ClosestApproach cpa = closest_approach(rel_before, rel_vel, kTickDt);
     rocket.best_miss_m = std::min(rocket.best_miss_m, cpa.distance_m);
 
-    if (!target_.destroyed() && cpa.distance_m < config_.rocket.proximity_fuze_radius_m) {
+    if (cpa.distance_m < config_.rocket.proximity_fuze_radius_m) {
+      // The fuze does not know whether the target already died: every
+      // passage detonates and rolls its own Pk. would_kill is therefore the
+      // UNCAPPED per-rocket kill metric (보고서 §5); killed keeps the
+      // one-kill-per-engagement adjudication. The roll order is part of the
+      // determinism contract — goldens regenerated with this change.
       const double pk = pk_from_miss(cpa.distance_m, config_.rocket.proximity_fuze_radius_m);
-      const bool killed = pk_rng_.next_double() < pk;
+      const bool would_kill = pk_rng_.next_double() < pk;
+      const bool killed = would_kill && !target_.destroyed();
       if (killed) {
         target_.destroy();
       }
       char buf[96];
       std::snprintf(buf, sizeof(buf), "rocket %u detonated: miss=%.1fm %s", rocket.id,
-                    cpa.distance_m, killed ? "KILL" : "no kill");
+                    cpa.distance_m,
+                    killed       ? "KILL"
+                    : would_kill ? "would-kill (target already dead)"
+                                 : "no kill");
       events_.push_back({tick_, buf});
-      finish_rocket(rocket, /*detonated=*/true, killed);
+      finish_rocket(rocket, /*detonated=*/true, killed, would_kill);
       continue;
     }
     if (rocket.state.position.z <= 0.0 && rocket.state.age_s > 0.5) {
-      finish_rocket(rocket, false, false);
+      finish_rocket(rocket, false, false, false);
       continue;
     }
     if (rocket.state.age_s >= config_.rocket.max_lifetime_s) {
-      finish_rocket(rocket, false, false);
+      finish_rocket(rocket, false, false, false);
     }
   }
 
@@ -180,6 +190,9 @@ std::optional<FiringSolution> World::solve_for_track(std::uint32_t track_id,
   }
   if (track->status != TrackStatus::kConfirmed) {
     return fail(SolveForTrackError::kNotConfirmed);
+  }
+  if (track->consecutive_missed_scans >= tracker_.params().max_coast_scans) {
+    return fail(SolveForTrackError::kStale);
   }
   // The estimated state slots straight into the truth-based solver: both are
   // a (position, velocity) pair under CV extrapolation. Sensor noise rides in
@@ -236,6 +249,7 @@ std::uint64_t World::state_hash() const {
     hasher.mix(res.miss_distance_m);
     hasher.mix(res.detonated);
     hasher.mix(res.killed);
+    hasher.mix(res.would_kill);
     hasher.mix(res.end_tick);
   }
   hasher.mix(gust_.current());

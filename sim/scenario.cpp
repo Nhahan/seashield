@@ -130,6 +130,16 @@ std::optional<Scenario> load_scenario_text(const std::string& text, std::string*
   Scenario scenario;
   scenario.weather_seed = kv.get_u64("weather_seed", 1);
   scenario.duration_s = kv.get_double("duration_s", 60.0);
+  scenario.fire_solution_rate_hz =
+      kv.get_double("fire_solution_rate_hz", scenario.fire_solution_rate_hz);
+  if (scenario.fire_solution_rate_hz < 0.0 || scenario.fire_solution_rate_hz > kTickRateHz) {
+    return fail("fire_solution_rate_hz must be in [0, tick rate]");
+  }
+  const int snapshot_delta = kv.get_int("snapshot_delta", scenario.snapshot_delta ? 1 : 0);
+  if (snapshot_delta != 0 && snapshot_delta != 1) {
+    return fail("snapshot_delta must be 0 or 1");
+  }
+  scenario.snapshot_delta = snapshot_delta == 1;
 
   WorldConfig& cfg = scenario.config;
   cfg.sim_seed = kv.get_u64("sim_seed", 1);
@@ -201,9 +211,14 @@ std::optional<Scenario> load_scenario_text(const std::string& text, std::string*
   cfg.tracker.drop_after_misses = kv.get_int("track_drop_misses", cfg.tracker.drop_after_misses);
   cfg.tracker.init_velocity_sigma_mps =
       kv.get_double("track_init_vel_sigma", cfg.tracker.init_velocity_sigma_mps);
+  cfg.tracker.max_coast_scans =
+      kv.get_int("track_max_coast_scans", cfg.tracker.max_coast_scans);
   if (cfg.tracker.confirm_m < 1 || cfg.tracker.confirm_n < cfg.tracker.confirm_m ||
-      cfg.tracker.confirm_n > 32 || cfg.tracker.drop_after_misses < 1) {
-    return fail("invalid track confirmation parameters (need 1 <= M <= N <= 32, misses >= 1)");
+      cfg.tracker.confirm_n > 32 || cfg.tracker.drop_after_misses < 1 ||
+      cfg.tracker.max_coast_scans < 1) {
+    return fail(
+        "invalid track confirmation parameters (need 1 <= M <= N <= 32, misses >= 1, "
+        "coast scans >= 1)");
   }
 
   if (const auto& invalid = kv.invalid_value_key()) {

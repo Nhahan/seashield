@@ -158,8 +158,12 @@ void Tracker::update(std::span<const Plot> plots, std::uint64_t tick) {
 }
 
 void Tracker::on_scan_boundary(std::uint64_t tick) {
-  const auto history_mask =
-      static_cast<std::uint32_t>((1u << static_cast<unsigned>(params_.confirm_n)) - 1u);
+  // confirm_n is validated to [1, 32]; the branch keeps the shift in-width
+  // at the 32 boundary (1u << 32 is undefined behaviour).
+  const std::uint32_t history_mask =
+      params_.confirm_n >= 32
+          ? 0xFFFFFFFFu
+          : ((1u << static_cast<unsigned>(params_.confirm_n)) - 1u);
   for (auto it = tracks_.begin(); it != tracks_.end();) {
     Track& track = *it;
     const bool hit = track.updated_this_scan;

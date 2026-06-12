@@ -89,6 +89,7 @@ class World {
     kNoSuchTrack = 0,
     kNotConfirmed = 1,  // Firing on a tentative track is procedurally refused.
     kNoSolution = 2,    // Solver did not converge (geometry out of reach).
+    kStale = 3,         // Confirmed but coasting past TrackerParams::max_coast_scans.
   };
   std::optional<FiringSolution> solve_for_track(std::uint32_t track_id,
                                                 SolveForTrackError* reason = nullptr) const;
@@ -105,7 +106,7 @@ class World {
   };
 
   void launch(const ScheduledLaunch& launch);
-  void finish_rocket(Rocket& rocket, bool detonated, bool killed);
+  void finish_rocket(Rocket& rocket, bool detonated, bool killed, bool would_kill);
   FlightEnvironment flight_environment() const;
 
   WorldConfig config_;

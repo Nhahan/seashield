@@ -59,6 +59,9 @@ struct RunRow {
   double miss_m = 0.0;
   bool detonated = false;
   bool killed = false;
+  // Uncapped Pk roll (independent of the one-kill-per-engagement cap) — the
+  // TRUE per-rocket kill probability for the §5 independence analysis.
+  bool would_kill = false;
   bool salvo_killed = false;  // Any rocket of this run killed the target.
 };
 

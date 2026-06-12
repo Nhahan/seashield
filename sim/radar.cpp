@@ -83,6 +83,9 @@ void Radar::step(std::uint64_t tick, std::span<const math::Vec3> target_position
     const double slant_range = rel.norm();
 
     // Fixed 7-draw opportunity (see header): roll first, noise always.
+    // The noisy angles are stored unwrapped (diagnostic fields only): every
+    // load-bearing consumer goes through the Cartesian conversion, which is
+    // periodic in the angle.
     const double roll = detection_rng_.next_double();
     const double noisy_range = slant_range + noise_rng_.gaussian(0.0, params_.sigma_range_m);
     const double noisy_azimuth = true_azimuth + noise_rng_.gaussian(0.0, params_.sigma_az_rad);

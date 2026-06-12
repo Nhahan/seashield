@@ -99,6 +99,49 @@ TEST(WorldTest, SolveForTrackEnforcesConfirmationAndLeavesStateUntouched) {
   EXPECT_GT(solution->time_of_flight_s, 0.0);
 }
 
+// P5: a confirmed track that keeps coasting (here: a sea-skimmer sailing past
+// the radar horizon) is refused for firing once it exceeds max_coast_scans —
+// the CV extrapolation is too stale to aim with, yet the track still lives.
+TEST(WorldTest, StaleCoastingTrackIsRefusedForFiring) {
+  WorldConfig cfg;
+  cfg.weather = calm_weather();
+  cfg.radar.antenna_height_m = 1.0;  // Horizon ≈ 13.3 km against a 5 m target.
+  cfg.radar.scan_period_s = 0.5;
+  cfg.tracker.drop_after_misses = 10;  // Keep the track alive while it coasts.
+  cfg.target.initial_position = {0, 5000, 5};
+  cfg.target.heading_rad = 0.0;  // Due north: outbound, toward the horizon.
+  cfg.target.speed_mps = 300.0;
+  World world(cfg);
+
+  std::uint32_t id = 0;
+  while (id == 0 && world.tick() < 60 * 20) {
+    world.step();
+    for (const TrackEvent& event : world.track_events()) {
+      if (event.kind == TrackEvent::Kind::kConfirmed) {
+        id = event.track_id;
+      }
+    }
+  }
+  ASSERT_NE(id, 0u) << "no track confirmed before the target left coverage";
+
+  // The gate trips BEFORE the solver runs, so this probe is cheap.
+  World::SolveForTrackError reason{};
+  bool stale_seen = false;
+  while (!stale_seen && world.tick() < 60 * 60) {
+    world.step();
+    const Track* track = world.tracker().find(id);
+    ASSERT_NE(track, nullptr) << "track dropped before the staleness gate tripped";
+    if (track->consecutive_missed_scans >= cfg.tracker.max_coast_scans) {
+      EXPECT_FALSE(world.solve_for_track(id, &reason).has_value());
+      EXPECT_EQ(reason, World::SolveForTrackError::kStale);
+      EXPECT_EQ(track->status, TrackStatus::kConfirmed);  // Coasting, not dropped.
+      EXPECT_TRUE(track->coasting());
+      stale_seen = true;
+    }
+  }
+  EXPECT_TRUE(stale_seen) << "target never coasted past the gate within 60 s";
+}
+
 TEST(WorldTest, SalvoLaunchesRequestedCount) {
   World world(hovering_target_config());
   FireCommand cmd;
