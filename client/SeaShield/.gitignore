@@ -1,0 +1,7 @@
+# UE generated/derived (the project regenerates all of it)
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+*.xcworkspace
+.vscode/
