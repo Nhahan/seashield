@@ -26,6 +26,15 @@ struct DummyClientConfig {
   // >= 0: send one FireRequest this long after the UDP bind completes
   // (requires weapons/solo role server-side).
   double fire_after_s = -1.0;
+  // Repeat fire: fire_count volleys spaced fire_interval_s apart starting at
+  // fire_after_s — stress runs accumulate hundreds of live rockets this way.
+  int fire_count = 1;
+  double fire_interval_s = 1.0;
+  // v4: assemble snapshots and ack them — the server then switches this
+  // client to the delta stream. Off by default so legacy full-snapshot
+  // statistics (and the tests pinned to them) keep their meaning; the
+  // delta/bandwidth tests opt in.
+  bool ack_snapshots = false;
   // With fire_at_track, the request designates the first CONFIRMED track seen
   // in snapshots (fire.track_id is filled in; fire.az/el become operator
   // offsets). The send is deferred until such a track exists.
@@ -66,6 +75,30 @@ struct DummyClientReport {
   std::uint16_t last_track_count = 0;     // kTrack records in the latest batch.
   double last_track_sigma_m = 0.0;        // Dequantized quality of the last track.
   std::uint16_t designated_track_id = 0;  // Track fired upon (fire_at_track).
+
+  // Fire-solution stream statistics (P5): the weapons console's PIP feed.
+  std::uint64_t fire_solutions_seen = 0;
+  std::uint64_t valid_fire_solutions_seen = 0;
+  protocol::FireSolution last_fire_solution;
+
+  // Raw downlink accounting (always on): every received UDP datagram.
+  std::uint64_t udp_datagrams = 0;
+  std::uint64_t udp_bytes = 0;
+  // v4: events received via the bind-time TCP backlog (pre-dedup count).
+  std::uint64_t backlog_events = 0;
+
+  // v4 delta-path statistics (populated when config.ack_snapshots).
+  std::uint64_t delta_batches = 0;
+  std::uint64_t assembled_ticks = 0;        // Frames completed (full or delta).
+  std::uint64_t delta_assembled_ticks = 0;  // Frames completed via delta.
+  std::uint16_t last_assembled_entities = 0;
+
+  // Welcome weather scalars (v3): the client-side visual drivers, echoed
+  // here so integration tests can assert the round trip.
+  double surface_wind_east_mps = 0.0;
+  double surface_wind_north_mps = 0.0;
+  double rain_intensity = 0.0;
+  double gust_sigma_mps = 0.0;
 };
 
 class DummyClient {

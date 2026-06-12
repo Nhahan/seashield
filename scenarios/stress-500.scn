@@ -1,0 +1,15 @@
+# P6 stress scenario (charter §10.3): tick-cost measurement with ~500 live
+# entities. NOT a realistic engagement — four oversized volleys with
+# long-lived rockets pile up airborne ordnance on purpose. The 256kbps
+# bandwidth target does NOT apply here (§6: that is the ~100-entity regime);
+# this scenario exists to bound the 60Hz tick budget under entity load.
+weather_seed = 7
+sim_seed = 3
+gust_seed = 5
+duration_s = 30
+target_x = 0
+target_y = 12000
+target_z = 600
+target_heading_deg = 180
+target_speed = 200
+rocket_lifetime = 40

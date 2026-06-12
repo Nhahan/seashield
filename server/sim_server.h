@@ -20,6 +20,8 @@
 #include "net/tcp_session.h"
 #include "net/udp_endpoint.h"
 #include "protocol/messages.h"
+#include <deque>
+
 #include "protocol/reliable.h"
 #include "sim/journal.h"
 #include "sim/scenario.h"
@@ -67,6 +69,15 @@ struct SimServerStats {
   // Track-designated fire whose solve failed (no/unconfirmed track, solver
   // divergence) — counted on the sim thread, surfaced for tests/monitoring.
   std::atomic<std::uint64_t> track_solution_failures{0};
+  std::atomic<std::uint64_t> fire_solutions_sent{0};
+  // v4 delta compression: batches sent as residuals, and snapshots that fell
+  // back to full because the client's acked baseline left the ring.
+  std::atomic<std::uint64_t> delta_batches_sent{0};
+  std::atomic<std::uint64_t> snapshot_full_fallbacks{0};
+  // v4 hardening: UdpHello carrying a stale incarnation nonce (refused), and
+  // engagement events replayed over TCP at bind time (AAR catch-up).
+  std::atomic<std::uint64_t> stale_udp_hellos{0};
+  std::atomic<std::uint64_t> backlog_events_sent{0};
   std::atomic<std::uint64_t> sim_output_dropped{0};
   std::atomic<std::uint64_t> udp_unbound_timeouts{0};
   std::atomic<std::uint64_t> sessions_created{0};
@@ -77,6 +88,12 @@ struct SimServerStats {
   std::atomic<std::uint64_t> tick_busy_sum_us{0};
   std::atomic<std::uint64_t> tick_busy_max_us{0};
   std::atomic<std::uint64_t> tick_busy_over_8ms{0};  // §10.3 budget guardrail.
+  // Power-of-two µs histogram (bucket b covers [2^(b-1), 2^b) µs; bucket 0 is
+  // a zero-cost tick, bucket 15 collects 16.4ms+). Single writer (sim
+  // thread). Gives the performance report the distribution and a
+  // conservative p99 bound; the exact 8ms counter stays the budget gate.
+  static constexpr std::size_t kTickHistBuckets = 16;
+  std::atomic<std::uint64_t> tick_busy_hist[kTickHistBuckets]{};
 };
 
 class SimServer {
@@ -116,6 +133,9 @@ class SimServer {
     protocol::EngagementPhase phase = protocol::EngagementPhase::kRunning;
     std::vector<protocol::EntityRecord> entities;
     std::vector<protocol::EngagementEvent> events;
+    // Confirmed-track fire solutions, produced at their own low cadence
+    // (scenario fire_solution_rate_hz) — unreliable, like snapshots.
+    std::vector<protocol::FireSolution> fire_solutions;
   };
 
   // Logical (operator) session: outlives its TCP transport so a reconnect
@@ -131,6 +151,19 @@ class SimServer {
     sockaddr_in udp_addr{};
     std::unique_ptr<protocol::ReliableEndpoint> endpoint;
     double last_udp_seen_s = 0.0;
+    // v4: the newest snapshot tick this client fully assembled — the delta
+    // baseline. Reset per incarnation (the client restarts its assembler).
+    std::uint32_t acked_tick = 0;
+    bool has_ack = false;
+    // v4 hardening: UDP binding nonce per incarnation (a stale pre-reconnect
+    // hello cannot steal the binding) and the event-backlog cursor — how many
+    // events this session has provably been shown. On unbind the cursor
+    // rewinds to its bind-time value: reliable in-flight events may have died
+    // with the binding, and a resend is harmless (client dedup) while a gap
+    // is not.
+    std::uint32_t udp_nonce = 0;
+    std::uint64_t events_conveyed = 0;
+    std::uint64_t events_at_bind = 0;
   };
 
   // --- I/O thread ---
@@ -151,8 +184,16 @@ class SimServer {
   void route_data_message(LogicalSession& session, protocol::MsgType type,
                           std::span<const std::uint8_t> payload);
   void dispatch_sim_output(const SimOutput& output);
+  // v4: encode one frame as delta batches against a ring baseline. Runs on
+  // the I/O thread like all wire encoding.
+  std::vector<std::vector<std::uint8_t>> encode_delta_batches(
+      const SimOutput& output, const std::vector<protocol::EntityRecord>& base,
+      std::uint32_t base_tick) const;
   void flush_session(LogicalSession& session, double now);
   void unbind_udp(LogicalSession& session, const char* reason);
+  // v4: replay every event the session has not been shown, over TCP, at
+  // UDP-bind time (charter §5.8 — late joiners and reconnects catch up).
+  void send_event_backlog(LogicalSession& session);
   void reap_transports();
   std::unique_ptr<protocol::ReliableEndpoint> make_endpoint() const;
   std::uint64_t make_token();
@@ -177,6 +218,13 @@ class SimServer {
   std::unordered_map<std::uint64_t, std::uint64_t> attachments_;  // transport id -> token
   std::unordered_map<std::uint64_t, LogicalSession> sessions_;    // token -> session
   std::unordered_map<std::uint64_t, std::uint64_t> udp_index_;    // addr key -> token
+  // v4 delta baselines: the last ~2 s of full snapshot frames (I/O thread
+  // only). A client acking older than this gets full snapshots again.
+  std::deque<std::pair<std::uint32_t, std::vector<protocol::EntityRecord>>> snapshot_ring_;
+  // v4 hardening (I/O thread): every engagement event ever emitted, for the
+  // bind-time TCP backlog; and the per-incarnation nonce source.
+  std::vector<protocol::EngagementEvent> event_log_;
+  std::uint32_t udp_nonce_counter_ = 0;
   std::vector<std::uint64_t> dead_transports_;
   std::uint64_t next_transport_id_ = 1;
   Pcg32 token_rng_;

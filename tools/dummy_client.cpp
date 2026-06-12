@@ -1,5 +1,7 @@
 #include "tools/dummy_client.h"
 
+#include "client/core/interp_buffer.h"
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -137,6 +139,10 @@ DummyClientReport DummyClient::run() {
   report.token = welcome.token;
   report.role = welcome.role;
   report.weather_summary = welcome.weather_summary;
+  report.surface_wind_east_mps = welcome.surface_wind_east_mps;
+  report.surface_wind_north_mps = welcome.surface_wind_north_mps;
+  report.rain_intensity = welcome.rain_intensity;
+  report.gust_sigma_mps = welcome.gust_sigma_mps;
 
   // --- Phase 2: UDP bind — repeat the hello until the ack lands ---
   const std::uint16_t udp_port = config_.udp_port != 0 ? config_.udp_port : welcome.udp_port;
@@ -159,6 +165,19 @@ DummyClientReport DummyClient::run() {
 
   std::set<std::tuple<std::uint8_t, std::uint16_t, std::uint32_t>> seen_events;
   std::uint16_t confirmed_track_seen = 0;
+  // v4 (opt-in): assemble frames and ack them so the server switches this
+  // client to the delta stream — the production console's behaviour.
+  client::SnapshotAssembler assembler;
+  const auto note_completed = [&](const client::CompletedSnapshot& done, bool via_delta) {
+    ++report.assembled_ticks;
+    if (via_delta) {
+      ++report.delta_assembled_ticks;
+    }
+    report.last_assembled_entities = static_cast<std::uint16_t>(done.entities.size());
+    protocol::SnapshotAck ack;
+    ack.tick = done.tick;
+    endpoint.send_unreliable(protocol::MsgType::kSnapshotAck, protocol::encode_payload(ack));
+  };
   const auto on_message = [&](protocol::MsgType type, std::span<const std::uint8_t> payload) {
     const auto message = protocol::decode_data_message(type, payload);
     if (!message) {
@@ -188,6 +207,18 @@ DummyClientReport DummyClient::run() {
         }
       }
       report.last_track_count = batch_tracks;
+      if (config_.ack_snapshots) {
+        if (const auto done = assembler.push(*snap)) {
+          note_completed(*done, /*via_delta=*/false);
+        }
+      }
+    } else if (const auto* delta = std::get_if<protocol::SnapshotDelta>(&*message)) {
+      ++report.delta_batches;
+      if (config_.ack_snapshots) {
+        if (const auto done = assembler.push_delta(*delta)) {
+          note_completed(*done, /*via_delta=*/true);
+        }
+      }
     } else if (const auto* event = std::get_if<protocol::EngagementEvent>(&*message)) {
       const auto key = std::make_tuple(static_cast<std::uint8_t>(event->kind), event->subject_id,
                                        event->tick);
@@ -195,6 +226,12 @@ DummyClientReport DummyClient::run() {
         report.duplicate_event = true;
       }
       report.events.push_back(*event);
+    } else if (const auto* solution = std::get_if<protocol::FireSolution>(&*message)) {
+      ++report.fire_solutions_seen;
+      if (solution->valid) {
+        ++report.valid_fire_solutions_seen;
+      }
+      report.last_fire_solution = *solution;
     }
   };
 
@@ -206,11 +243,14 @@ DummyClientReport DummyClient::run() {
         if (errno == EINTR) continue;
         return;  // EAGAIN: drained.
       }
+      ++report.udp_datagrams;
+      report.udp_bytes += static_cast<std::uint64_t>(n);
       endpoint.on_datagram(now_s(), {datagram, static_cast<std::size_t>(n)}, on_message);
     }
   };
 
-  const auto hello_payload = protocol::encode_payload(protocol::UdpHello{report.token});
+  const auto hello_payload =
+      protocol::encode_payload(protocol::UdpHello{report.token, welcome.udp_nonce});
   const double bind_started = now_s();
   double next_hello = bind_started;
   while (!report.udp_bound && !stop_.load()) {
@@ -233,16 +273,18 @@ DummyClientReport DummyClient::run() {
   // --- Phase 3: consume the engagement ---
   const double run_started = now_s();
   double next_keepalive = run_started;
-  bool fired = false;
+  int volleys_fired = 0;
   while (!stop_.load() && now_s() - run_started < config_.duration_s) {
     const double now = now_s();
     if (now >= next_keepalive) {
       endpoint.send_unreliable(protocol::MsgType::kKeepalive, {});
       next_keepalive = now + config_.keepalive_interval_s;
     }
-    if (!fired && config_.fire_after_s >= 0.0 && now - run_started >= config_.fire_after_s &&
+    if (volleys_fired < config_.fire_count && config_.fire_after_s >= 0.0 &&
+        now - run_started >=
+            config_.fire_after_s + static_cast<double>(volleys_fired) * config_.fire_interval_s &&
         (!config_.fire_at_track || confirmed_track_seen != 0)) {
-      fired = true;
+      ++volleys_fired;
       protocol::FireRequest fire = config_.fire;
       if (config_.fire_at_track) {
         fire.track_id = confirmed_track_seen;  // az/el ride along as offsets.
@@ -266,8 +308,32 @@ DummyClientReport DummyClient::run() {
         report.disconnected_early = true;
         break;
       }
-      // The P3 server sends nothing further over TCP after the welcome;
-      // anything readable is drained and ignored.
+      if (n > 0) {
+        // Post-welcome TCP carries the bind-time event backlog (v4). Overlap
+        // with live UDP events at the bind boundary is by design — dedup on
+        // the same key, but do NOT flag it: duplicate_event is the reliable
+        // channel's exactly-once contract, which this path is outside of.
+        tcp_parser.feed({buf, static_cast<std::size_t>(n)},
+                        [&](std::span<const std::uint8_t> frame) {
+                          const auto message = protocol::decode_control_frame(frame);
+                          if (!message) {
+                            return;
+                          }
+                          const auto* backlog = std::get_if<protocol::EventBacklog>(&*message);
+                          if (backlog == nullptr) {
+                            return;
+                          }
+                          for (const protocol::EngagementEvent& event : backlog->events) {
+                            ++report.backlog_events;
+                            const auto key =
+                                std::make_tuple(static_cast<std::uint8_t>(event.kind),
+                                                event.subject_id, event.tick);
+                            if (seen_events.insert(key).second) {
+                              report.events.push_back(event);
+                            }
+                          }
+                        });
+      }
     }
   }
   flush_udp();  // Final ack pass so the server's in-flight events drain.

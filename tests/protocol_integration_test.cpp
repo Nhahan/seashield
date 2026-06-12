@@ -265,11 +265,113 @@ TEST_F(ProtocolIntegrationTest, TokenReconnectRestoresRoleAndBadTokenIsRejected)
   EXPECT_EQ(bogus_report.reject_reason, protocol::RejectReason::kBadToken);
 }
 
+// P6 hardening: a UdpHello carrying a stale incarnation nonce must not steal
+// the binding (the pre-reconnect socket race, P3 backlog).
+TEST_F(ProtocolIntegrationTest, StaleUdpHelloCannotStealTheBinding) {
+  start_server();
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(server_->tcp_port());
+  ASSERT_EQ(::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr), 1);
+
+  // Manual handshake twice with the same token: two incarnations, two nonces.
+  std::uint64_t token = 0;
+  std::uint32_t nonce1 = 0;
+  std::uint32_t nonce2 = 0;
+  const auto handshake = [&](std::uint64_t with_token, std::uint32_t& nonce_out) {
+    UniqueFd tcp(::socket(AF_INET, SOCK_STREAM, 0));
+    ASSERT_TRUE(tcp.valid());
+    ASSERT_EQ(::connect(tcp.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)), 0);
+    protocol::ClientHello hello;
+    hello.role = protocol::Role::kObserver;
+    hello.token = with_token;
+    std::vector<std::uint8_t> frame;
+    net::FrameParser::encode(frame, protocol::encode_control_frame(hello));
+    ASSERT_EQ(::send(tcp.get(), frame.data(), frame.size(), net::send_flags_nosignal()),
+              static_cast<ssize_t>(frame.size()));
+    net::FrameParser parser;
+    std::uint8_t buf[2048];
+    bool welcomed = false;
+    while (!welcomed) {
+      const ssize_t n = ::recv(tcp.get(), buf, sizeof(buf), 0);
+      ASSERT_GT(n, 0);
+      ASSERT_TRUE(parser.feed({buf, static_cast<std::size_t>(n)},
+                              [&](std::span<const std::uint8_t> body) {
+                                const auto message = protocol::decode_control_frame(body);
+                                ASSERT_TRUE(message.has_value());
+                                const auto& welcome =
+                                    std::get<protocol::ServerWelcome>(*message);
+                                token = welcome.token;
+                                nonce_out = welcome.udp_nonce;
+                                welcomed = true;
+                              }));
+    }
+    // Returning closes the transport — the seat detaches and can reattach.
+  };
+  handshake(0, nonce1);
+  handshake(token, nonce2);
+  ASSERT_NE(nonce1, nonce2) << "incarnations must get distinct nonces";
+
+  UniqueFd udp(::socket(AF_INET, SOCK_DGRAM, 0));
+  ASSERT_TRUE(udp.valid());
+  addr.sin_port = htons(server_->udp_port());
+  ASSERT_EQ(::connect(udp.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)), 0);
+  timeval timeout{0, 200 * 1000};
+  ::setsockopt(udp.get(), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+  std::uint8_t buf[2048];
+
+  const auto try_bind = [&](std::uint32_t nonce) {
+    protocol::ReliableEndpoint endpoint;
+    const auto hello = protocol::encode_payload(protocol::UdpHello{token, nonce});
+    for (int attempt = 0; attempt < 10; ++attempt) {
+      endpoint.send_unreliable(protocol::MsgType::kUdpHello, hello);
+      endpoint.flush(0.1 * attempt, [&](std::span<const std::uint8_t> datagram) {
+        [[maybe_unused]] const ssize_t sent =
+            ::send(udp.get(), datagram.data(), datagram.size(), 0);
+      });
+      if (::recv(udp.get(), buf, sizeof(buf), 0) > 0) {
+        return true;
+      }
+    }
+    return false;
+  };
+  EXPECT_FALSE(try_bind(nonce1)) << "stale incarnation nonce bound the session";
+  EXPECT_GE(server_->stats().stale_udp_hellos.load(), 1u);
+  EXPECT_TRUE(try_bind(nonce2)) << "live incarnation nonce must bind";
+}
+
+// P6 hardening: a console that joins (or rejoins) late catches up on every
+// engagement event via the bind-time TCP backlog — AAR-complete history.
+TEST_F(ProtocolIntegrationTest, LateJoinerCatchesUpViaEventBacklog) {
+  start_server([](server::SimServerConfig& config) {
+    config.scenario.config.radar.scan_period_s = 0.5;
+  });
+  const auto live = run_clients({low_splash_fire(4.0)})[0];
+  ASSERT_TRUE(live.welcomed) << live.error;
+  ASSERT_EQ(count_kind(live, protocol::EventKind::kRocketResolved), 4u);
+
+  // The engagement is over; this client missed all of it.
+  tools::DummyClientConfig late;
+  late.role = protocol::Role::kObserver;
+  late.duration_s = 1.5;
+  const auto rejoin = run_clients({late})[0];
+  ASSERT_TRUE(rejoin.welcomed) << rejoin.error;
+  EXPECT_GT(rejoin.backlog_events, 0u) << "no TCP backlog arrived";
+  EXPECT_FALSE(rejoin.duplicate_event);
+  EXPECT_EQ(count_kind(rejoin, protocol::EventKind::kLaunch), 4u);
+  EXPECT_EQ(count_kind(rejoin, protocol::EventKind::kRocketResolved), 4u);
+  EXPECT_EQ(event_multiset(rejoin), event_multiset(live))
+      << "late joiner must reconstruct the exact event history";
+}
+
 // P4: the estimate stream — every console receives kTrack records (with the
 // quality byte) and the confirmed/lost lifecycle events exactly once.
 TEST_F(ProtocolIntegrationTest, TrackStreamReachesEveryConsole) {
   start_server([](server::SimServerConfig& config) {
     config.scenario.config.radar.scan_period_s = 0.5;  // Confirm within ~1.5 s.
+    // The shared fixture caps rocket lifetime below the solver's ToF; relax
+    // it so the streamed fire solutions (P5) can actually converge.
+    config.scenario.config.rocket.max_lifetime_s = 40.0;
   });
   tools::DummyClientConfig observer;
   observer.role = protocol::Role::kObserver;
@@ -285,8 +387,18 @@ TEST_F(ProtocolIntegrationTest, TrackStreamReachesEveryConsole) {
     EXPECT_GE(report.max_track_state_seen, 1u) << "track never seen confirmed";
     EXPECT_GT(report.last_track_sigma_m, 0.0);
     EXPECT_EQ(count_kind(report, protocol::EventKind::kTrackConfirmed), 1u);
+    // v3: welcome carries the visual-driver weather scalars...
+    EXPECT_GE(report.rain_intensity, 0.0);
+    EXPECT_LE(report.rain_intensity, 1.0);
+    EXPECT_GE(report.gust_sigma_mps, 0.0);
+    // ...and confirmed tracks stream fire solutions at the low cadence.
+    EXPECT_GT(report.fire_solutions_seen, 0u) << "no FireSolution arrived";
+    EXPECT_GT(report.valid_fire_solutions_seen, 0u) << "no converged solution";
+    EXPECT_GT(report.last_fire_solution.time_of_flight_s, 0.0F);
+    EXPECT_GT(report.last_fire_solution.dispersion_radius_m, 0.0F);
   }
   EXPECT_EQ(event_multiset(reports[0]), event_multiset(reports[1]));
+  EXPECT_GT(server_->stats().fire_solutions_sent.load(), 0u);
 }
 
 // P4: the operator designates a track instead of aiming manually; the SIM
@@ -416,6 +528,7 @@ TEST_F(ProtocolIntegrationTest, SilentClientLosesUdpBindingWithoutHarmingOthers)
             static_cast<ssize_t>(frame.size()));
 
   std::uint64_t token = 0;
+  std::uint32_t udp_nonce = 0;
   net::FrameParser parser;
   std::uint8_t buf[2048];
   while (token == 0) {
@@ -425,7 +538,9 @@ TEST_F(ProtocolIntegrationTest, SilentClientLosesUdpBindingWithoutHarmingOthers)
                             [&](std::span<const std::uint8_t> body) {
                               const auto message = protocol::decode_control_frame(body);
                               ASSERT_TRUE(message.has_value());
-                              token = std::get<protocol::ServerWelcome>(*message).token;
+                              const auto& welcome = std::get<protocol::ServerWelcome>(*message);
+                              token = welcome.token;
+                              udp_nonce = welcome.udp_nonce;  // v4 binding nonce.
                             }));
   }
 
@@ -434,7 +549,7 @@ TEST_F(ProtocolIntegrationTest, SilentClientLosesUdpBindingWithoutHarmingOthers)
   addr.sin_port = htons(server_->udp_port());
   ASSERT_EQ(::connect(udp.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)), 0);
   protocol::ReliableEndpoint endpoint;
-  const auto hello = protocol::encode_payload(protocol::UdpHello{token});
+  const auto hello = protocol::encode_payload(protocol::UdpHello{token, udp_nonce});
   timeval timeout{0, 200 * 1000};
   ::setsockopt(udp.get(), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
   bool bound = false;
@@ -458,6 +573,70 @@ TEST_F(ProtocolIntegrationTest, SilentClientLosesUdpBindingWithoutHarmingOthers)
   EXPECT_EQ(count_kind(report, protocol::EventKind::kRocketResolved), 4u);
   EXPECT_GE(server_->stats().udp_unbound_timeouts.load(), 1u)
       << "silent client kept its UDP binding past the peer timeout";
+}
+
+// P6 (protocol v4): a client that acks switches to the residual delta stream
+// — the downlink shrinks materially while the assembled frames keep flowing.
+// 16 persistent rockets put the comparison in the regime where record size,
+// not packet headers, dominates (charter §6's bandwidth arithmetic).
+TEST_F(ProtocolIntegrationTest, DeltaStreamCutsDownlinkAgainstFullSnapshots) {
+  const auto run_mode = [&](bool ack) {
+    start_server([](server::SimServerConfig& config) {
+      config.scenario.config.rocket.max_lifetime_s = 40.0;  // Rockets persist.
+    });
+    tools::DummyClientConfig client = low_splash_fire(6.0);
+    client.fire.salvo_count = 16;
+    client.fire.elevation_rad = math::deg_to_rad(45.0);  // Long ballistic arc.
+    client.ack_snapshots = ack;
+    return run_clients({client})[0];
+  };
+  const auto full = run_mode(false);
+  const auto delta = run_mode(true);
+  ASSERT_TRUE(full.welcomed) << full.error;
+  ASSERT_TRUE(delta.welcomed) << delta.error;
+
+  EXPECT_EQ(full.delta_batches, 0u) << "a silent client must stay on full snapshots";
+  EXPECT_GT(delta.delta_assembled_ticks, 100u) << "delta stream never took over";
+  EXPECT_GE(delta.last_assembled_entities, 17u) << "salvo entities missing from frames";
+  EXPECT_GT(server_->stats().delta_batches_sent.load(), 0u);
+
+  // The headline number (~0.5 expected; 0.7 leaves margin for the shared
+  // keepalive/event/fire-solution overhead riding both runs).
+  ASSERT_GT(full.udp_bytes, 0u);
+  EXPECT_LT(delta.udp_bytes, full.udp_bytes * 7 / 10)
+      << "delta=" << delta.udp_bytes << "B full=" << full.udp_bytes << "B";
+}
+
+// P6: the acked-baseline scheme under 10% loss — deltas reference a frame the
+// client provably has, so lost deltas only thin the stream, never break it.
+TEST_F(ProtocolIntegrationTest, DeltaStreamSurvivesChaosLoss) {
+  start_server([](server::SimServerConfig& config) {
+    config.scenario.config.rocket.max_lifetime_s = 40.0;
+  });
+  tools::ChaosConfig chaos;
+  chaos.upstream_port = server_->udp_port();
+  chaos.loss = 0.10;
+  chaos.seed = 7;
+  tools::ChaosProxy proxy(chaos);
+  ASSERT_TRUE(proxy.init());
+  std::thread proxy_thread([&] { proxy.run(); });
+
+  tools::DummyClientConfig client = low_splash_fire(5.0);
+  client.fire.salvo_count = 16;
+  client.fire.elevation_rad = math::deg_to_rad(45.0);
+  client.ack_snapshots = true;
+  client.udp_port = proxy.listen_port();
+  const auto report = run_clients({client})[0];
+  proxy.stop();
+  proxy_thread.join();
+
+  ASSERT_TRUE(report.welcomed) << report.error;
+  EXPECT_GT(proxy.dropped(), 0u) << "chaos proxy injected no loss — test proves nothing";
+  // 5s at 30Hz = ~150 frames; with 10% datagram loss anything past 60
+  // assembled frames proves the delta chain keeps healing.
+  EXPECT_GE(report.assembled_ticks, 60u);
+  EXPECT_GT(report.delta_assembled_ticks, 30u);
+  EXPECT_FALSE(report.duplicate_event);
 }
 
 // The P3a gate, now over REAL sockets: 10% loss + duplication + 30ms jitter

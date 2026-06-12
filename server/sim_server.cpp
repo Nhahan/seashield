@@ -131,6 +131,17 @@ void SimServer::stop() {
                 static_cast<unsigned long long>(stats_.tick_busy_max_us.load()),
                 static_cast<unsigned long long>(stats_.tick_busy_over_8ms.load()),
                 static_cast<unsigned long long>(ticks));
+    // Conservative p99 from the log-bucket histogram: the upper edge of the
+    // first bucket whose cumulative count covers 99% of ticks.
+    std::uint64_t cumulative = 0;
+    for (std::size_t bucket = 0; bucket < SimServerStats::kTickHistBuckets; ++bucket) {
+      cumulative += stats_.tick_busy_hist[bucket].load();
+      if (cumulative * 100 >= ticks * 99) {
+        SS_LOG_INFO("tick cost p99 <= %lluus (hist bucket %zu)",
+                    static_cast<unsigned long long>(1ull << bucket), bucket);
+        break;
+      }
+    }
   }
   if (!config_.journal_path.empty()) {
     std::ofstream out(config_.journal_path);
@@ -195,12 +206,69 @@ void SimServer::flush_session(LogicalSession& session, double now) {
       now, [&](std::span<const std::uint8_t> datagram) { udp_->send_to(datagram, addr); });
 }
 
+std::vector<std::vector<std::uint8_t>> SimServer::encode_delta_batches(
+    const SimOutput& output, const std::vector<protocol::EntityRecord>& base,
+    std::uint32_t base_tick) const {
+  std::map<std::uint32_t, const protocol::EntityRecord*> base_index;
+  for (const protocol::EntityRecord& entity : base) {
+    base_index[(static_cast<std::uint32_t>(entity.kind) << 16) | entity.id] = &entity;
+  }
+  const std::uint32_t dticks = output.tick - base_tick;
+  std::vector<protocol::DeltaEntity> records;
+  records.reserve(output.entities.size());
+  for (const protocol::EntityRecord& current : output.entities) {
+    const auto it =
+        base_index.find((static_cast<std::uint32_t>(current.kind) << 16) | current.id);
+    if (it == base_index.end()) {
+      protocol::DeltaEntity escape;  // New since the baseline: full record.
+      escape.id = current.id;
+      escape.mask = static_cast<std::uint8_t>(
+          (static_cast<std::uint8_t>(current.kind) << protocol::DeltaEntity::kKindShift) |
+          protocol::DeltaEntity::kFullRecord);
+      escape.full = current;
+      records.push_back(escape);
+    } else {
+      records.push_back(
+          protocol::make_delta_entity(*it->second, current, dticks, sim::kTickRateHz));
+    }
+  }
+
+  // Greedy batching under the datagram budget (records vary 9..23 bytes).
+  constexpr std::size_t kDeltaHeaderBytes = 4 + 4 + 1 + 2 + 2 + 1;
+  const std::size_t budget =
+      protocol::kMaxDatagramBytes - protocol::kPacketHeaderBytes - kDeltaHeaderBytes;
+  std::vector<std::vector<std::uint8_t>> payloads;
+  std::size_t first = 0;
+  while (first < records.size()) {
+    protocol::SnapshotDelta delta;
+    delta.tick = output.tick;
+    delta.base_tick = base_tick;
+    delta.phase = output.phase;
+    delta.total_entities = static_cast<std::uint16_t>(records.size());
+    delta.first_index = static_cast<std::uint16_t>(first);
+    std::size_t used = 0;
+    while (first < records.size() && delta.entities.size() < 255) {
+      const std::size_t size = records[first].encoded_size();
+      if (used + size > budget) {
+        break;
+      }
+      used += size;
+      delta.entities.push_back(records[first]);
+      ++first;
+    }
+    payloads.push_back(protocol::encode_payload(delta));
+  }
+  return payloads;
+}
+
 void SimServer::dispatch_sim_output(const SimOutput& output) {
   // Encode each payload ONCE, then hand the same bytes to every session's
   // endpoint (which wraps them in its own packet header).
   std::vector<std::vector<std::uint8_t>> snapshot_batches;
   if (output.has_snapshot) {
     const std::size_t total = output.entities.size();
+    // The `first == 0` clause makes the loop emit at least one batch even
+    // when total == 0, so clients still see the tick advance.
     for (std::size_t first = 0; first == 0 || first < total; first += kEntitiesPerBatch) {
       protocol::Snapshot snap;
       snap.tick = output.tick;
@@ -216,29 +284,91 @@ void SimServer::dispatch_sim_output(const SimOutput& output) {
       }
     }
   }
+  // v4 delta baselines: remember the frame so later frames can be encoded
+  // as residuals against whatever tick each client has acked.
+  if (output.has_snapshot) {
+    constexpr std::size_t kSnapshotRingFrames = 64;  // ~2 s at 30 Hz.
+    snapshot_ring_.emplace_back(output.tick, output.entities);
+    while (snapshot_ring_.size() > kSnapshotRingFrames) {
+      snapshot_ring_.pop_front();
+    }
+  }
+
   std::vector<std::vector<std::uint8_t>> event_payloads;
   event_payloads.reserve(output.events.size());
   for (const auto& event : output.events) {
     event_payloads.push_back(protocol::encode_payload(event));
   }
+  // v4: every event also lands in the permanent log that backs the bind-time
+  // TCP catch-up (charter §5.8).
+  event_log_.insert(event_log_.end(), output.events.begin(), output.events.end());
+  std::vector<std::vector<std::uint8_t>> fire_solution_payloads;
+  fire_solution_payloads.reserve(output.fire_solutions.size());
+  for (const auto& solution : output.fire_solutions) {
+    fire_solution_payloads.push_back(protocol::encode_payload(solution));
+  }
 
+  std::map<std::uint32_t, std::vector<std::vector<std::uint8_t>>> delta_cache;
   std::vector<std::uint64_t> overflowed;
   for (auto& [token, session] : sessions_) {
     if (!session.udp_bound) {
       continue;
     }
-    for (const auto& batch : snapshot_batches) {
-      session.endpoint->send_unreliable(protocol::MsgType::kSnapshot, batch);
-      stats_.snapshot_batches_sent.fetch_add(1);
+    // v4: a client whose acked baseline is still in the ring gets residual
+    // deltas; everyone else (silent, behind, or delta disabled) gets full
+    // snapshots. Each distinct baseline is encoded once and reused.
+    bool delta_sent = false;
+    if (output.has_snapshot && config_.scenario.snapshot_delta && session.has_ack &&
+        session.acked_tick < output.tick && !output.entities.empty()) {
+      auto cached = delta_cache.find(session.acked_tick);
+      if (cached == delta_cache.end()) {
+        const std::vector<protocol::EntityRecord>* base = nullptr;
+        for (const auto& [ring_tick, ring_entities] : snapshot_ring_) {
+          if (ring_tick == session.acked_tick) {
+            base = &ring_entities;
+            break;
+          }
+        }
+        if (base != nullptr) {
+          cached = delta_cache
+                       .emplace(session.acked_tick,
+                                encode_delta_batches(output, *base, session.acked_tick))
+                       .first;
+        }
+      }
+      if (cached != delta_cache.end()) {
+        for (const auto& payload : cached->second) {
+          session.endpoint->send_unreliable(protocol::MsgType::kSnapshotDelta, payload);
+          stats_.delta_batches_sent.fetch_add(1);
+        }
+        delta_sent = true;
+      } else {
+        stats_.snapshot_full_fallbacks.fetch_add(1);  // Baseline left the ring.
+      }
     }
+    if (!delta_sent) {
+      for (const auto& batch : snapshot_batches) {
+        session.endpoint->send_unreliable(protocol::MsgType::kSnapshot, batch);
+        stats_.snapshot_batches_sent.fetch_add(1);
+      }
+    }
+    for (const auto& payload : fire_solution_payloads) {
+      session.endpoint->send_unreliable(protocol::MsgType::kFireSolution, payload);
+      stats_.fire_solutions_sent.fetch_add(1);
+    }
+    bool events_ok = true;
     for (const auto& payload : event_payloads) {
       if (!session.endpoint->send_reliable(protocol::MsgType::kEngagementEvent, payload)) {
         // Same philosophy as the TCP send-queue cap (§6.3): a peer that lets
         // 256 events pile up unacknowledged is unrecoverable.
         overflowed.push_back(token);
+        events_ok = false;
         break;
       }
       stats_.events_sent.fetch_add(1);
+    }
+    if (events_ok) {
+      session.events_conveyed = event_log_.size();  // Backlog cursor (v4).
     }
   }
   for (const std::uint64_t token : overflowed) {
@@ -257,10 +387,34 @@ void SimServer::unbind_udp(LogicalSession& session, const char* reason) {
   }
   session.udp_bound = false;
   // Fresh endpoint for the next incarnation: sequence spaces are born in
-  // pairs, so the stale one must not survive a rebind. Undelivered events of
-  // the old incarnation die with it — the full snapshot resync covers state,
-  // and this limit is documented in the protocol spec.
+  // pairs, so the stale one must not survive a rebind. Events possibly lost
+  // with the old incarnation's in-flight window are covered by rewinding the
+  // backlog cursor — the next bind replays from here over TCP (v4; the
+  // client's dedup absorbs the overlap).
   session.endpoint = make_endpoint();
+  session.events_conveyed = session.events_at_bind;
+}
+
+void SimServer::send_event_backlog(LogicalSession& session) {
+  session.events_at_bind = session.events_conveyed;
+  if (session.events_conveyed >= event_log_.size()) {
+    return;
+  }
+  const auto transport = transports_.find(session.transport_id);
+  if (transport == transports_.end()) {
+    return;  // No live TCP transport: the next incarnation will catch up.
+  }
+  std::size_t cursor = session.events_conveyed;
+  while (cursor < event_log_.size()) {
+    protocol::EventBacklog backlog;
+    const std::size_t count = std::min<std::size_t>(255, event_log_.size() - cursor);
+    backlog.events.assign(event_log_.begin() + static_cast<std::ptrdiff_t>(cursor),
+                          event_log_.begin() + static_cast<std::ptrdiff_t>(cursor + count));
+    transport->second->send(protocol::encode_control_frame(backlog));
+    stats_.backlog_events_sent.fetch_add(count);
+    cursor += count;
+  }
+  session.events_conveyed = event_log_.size();
 }
 
 void SimServer::reap_transports() {
@@ -380,6 +534,8 @@ void SimServer::handle_hello(net::TcpSession& transport, const protocol::ClientH
     }
     session = &it->second;
     unbind_udp(*session, "reconnect");  // New incarnation; client re-binds UDP.
+    session->has_ack = false;  // The client restarts its assembler too (v4).
+    session->acked_tick = 0;
     stats_.sessions_reattached.fetch_add(1);
   } else {
     if (!role_available(hello.role)) {
@@ -399,13 +555,22 @@ void SimServer::handle_hello(net::TcpSession& transport, const protocol::ClientH
   attachments_[transport.id()] = session->token;
   pending_hello_.erase(transport.id());
 
+  session->udp_nonce = ++udp_nonce_counter_;  // Fresh per incarnation (v4).
   protocol::ServerWelcome welcome;
   welcome.token = session->token;
   welcome.role = session->role;
+  welcome.udp_nonce = session->udp_nonce;
   welcome.udp_port = udp_port_;
   welcome.tick_rate_hz = static_cast<std::uint16_t>(sim::kTickRateHz);
   welcome.snapshot_rate_hz = static_cast<std::uint16_t>(sim::kTickRateHz / 2);
   welcome.weather_summary = config_.scenario.config.weather.describe();
+  const sim::Weather& weather = config_.scenario.config.weather;
+  if (!weather.wind_layers.empty()) {
+    welcome.surface_wind_east_mps = weather.wind_layers.front().velocity.x;
+    welcome.surface_wind_north_mps = weather.wind_layers.front().velocity.y;
+  }
+  welcome.rain_intensity = weather.rain_intensity;
+  welcome.gust_sigma_mps = weather.turbulence_intensity * weather.surface_wind_speed();
   transport.send(protocol::encode_control_frame(welcome));
   SS_LOG_INFO("session %llx: role %u attached to transport %llu",
               static_cast<unsigned long long>(session->token),
@@ -506,6 +671,12 @@ void SimServer::try_udp_bind(std::span<const std::uint8_t> payload, const sockad
       return;  // Unknown token: spoof surface acknowledged in the spec.
     }
     LogicalSession& session = session_it->second;
+    if (hello->nonce != session.udp_nonce) {
+      // A pre-reconnect socket's late hello must not steal the binding of
+      // the live incarnation (P3 backlog: transport-incarnation 결속).
+      stats_.stale_udp_hellos.fetch_add(1);
+      return;
+    }
     if (session.udp_bound) {
       udp_index_.erase(addr_key(session.udp_addr));  // Client moved ports.
     }
@@ -513,12 +684,13 @@ void SimServer::try_udp_bind(std::span<const std::uint8_t> payload, const sockad
     session.udp_bound = true;
     udp_index_[addr_key(from)] = session.token;
     SS_LOG_INFO("session %llx: udp bound", static_cast<unsigned long long>(session.token));
+    send_event_backlog(session);
     return;
   }
 }
 
 void SimServer::route_data_message(LogicalSession& session, protocol::MsgType type,
-                                   std::span<const std::uint8_t>) {
+                                   std::span<const std::uint8_t> payload) {
   switch (type) {
     case protocol::MsgType::kUdpHello:
       // Idempotent re-ack: the client repeats the hello until this lands.
@@ -526,6 +698,15 @@ void SimServer::route_data_message(LogicalSession& session, protocol::MsgType ty
       break;
     case protocol::MsgType::kKeepalive:
       break;  // Its packet header (acks) already did the work.
+    case protocol::MsgType::kSnapshotAck: {
+      const auto message = protocol::decode_data_message(type, payload);
+      const auto* ack = message ? std::get_if<protocol::SnapshotAck>(&*message) : nullptr;
+      if (ack != nullptr && (!session.has_ack || ack->tick > session.acked_tick)) {
+        session.acked_tick = ack->tick;  // Monotonic: a late ack cannot rewind.
+        session.has_ack = true;
+      }
+      break;
+    }
     default:
       break;  // Client-to-server snapshots/events do not exist; ignore.
   }
@@ -546,6 +727,21 @@ void SimServer::sim_thread_main() {
   bool target_destroyed_sent = false;
   bool end_sent = false;
   std::uint64_t cadence = 0;
+  // Per-track backoff after a FAILED streaming solve: non-convergent
+  // geometry burns the solver's full iteration budget (tens of ms measured,
+  // P6 perf report), so the sim thread pays that at most once per cooldown
+  // while converged tracks keep their normal cadence.
+  constexpr std::uint64_t kSolveBackoffTicks = 5 * sim::kTickRateHz;
+  std::map<std::uint32_t, std::uint64_t> solve_backoff_until;
+  // Fire-solution cadence (scenario fire_solution_rate_hz, 0 = off): one PIP
+  // solve integrates a full trajectory, so riding the 30Hz snapshot cadence
+  // would threaten the 16.6ms tick budget (§10.3).
+  const std::uint64_t fire_solution_interval =
+      config_.scenario.fire_solution_rate_hz > 0.0
+          ? std::max<std::uint64_t>(
+                1, static_cast<std::uint64_t>(
+                       sim::kTickRateHz / config_.scenario.fire_solution_rate_hz + 0.5))
+          : 0;
   auto next_tick_at = steady_clock::now();
 
   while (sim_running_.load()) {
@@ -698,10 +894,47 @@ void SimServer::sim_thread_main() {
         output.entities.push_back(record);
       }
     }
+
+    // 4b. Fire solutions for confirmed tracks at their own low cadence. The
+    // radius is quoted at the default dispersion; the console rescales it
+    // linearly when the operator changes the setting (radius ∝ dispersion).
+    if (running && fire_solution_interval != 0 && cadence % fire_solution_interval == 0) {
+      for (const sim::Track& track : world.tracker().tracks()) {
+        if (track.status != sim::TrackStatus::kConfirmed) {
+          continue;
+        }
+        const auto backoff = solve_backoff_until.find(track.id);
+        if (backoff != solve_backoff_until.end() && world.tick() < backoff->second) {
+          continue;  // Recently failed: the geometry will not change in 0.5s.
+        }
+        protocol::FireSolution fire_solution;
+        fire_solution.tick = static_cast<std::uint32_t>(world.tick());
+        fire_solution.track_id = static_cast<std::uint16_t>(track.id);
+        if (const auto solution = world.solve_for_track(track.id)) {
+          solve_backoff_until.erase(track.id);
+          // The solver aims at the CV extrapolation of the estimate — that
+          // IS the PIP under the track's motion model.
+          const math::Vec3 pip =
+              track.position() + track.velocity() * solution->time_of_flight_s;
+          fire_solution.valid = true;
+          fire_solution.pip_x = pip.x;
+          fire_solution.pip_y = pip.y;
+          fire_solution.pip_z = pip.z;
+          fire_solution.time_of_flight_s = static_cast<float>(solution->time_of_flight_s);
+          fire_solution.dispersion_radius_m =
+              static_cast<float>(sim::FireCommand{}.dispersion_mrad * 1e-3 * pip.norm());
+        } else {
+          solve_backoff_until[track.id] = world.tick() + kSolveBackoffTicks;
+        }
+        // valid=false still goes out once per failure — the console gets its
+        // "no solution" signal, then the backoff silences the retries.
+        output.fire_solutions.push_back(fire_solution);
+      }
+    }
     ++cadence;
 
     // 5. Publish and wake the I/O thread ("push, then wakeup" — design §4.3).
-    if (output.has_snapshot || !output.events.empty()) {
+    if (output.has_snapshot || !output.events.empty() || !output.fire_solutions.empty()) {
       if (sim_to_net_.push(std::move(output))) {
         loop_->wakeup();
       } else {
@@ -712,6 +945,10 @@ void SimServer::sim_thread_main() {
     const auto busy_us = static_cast<std::uint64_t>(
         duration_cast<microseconds>(steady_clock::now() - work_started).count());
     stats_.tick_busy_sum_us.fetch_add(busy_us);
+    stats_
+        .tick_busy_hist[std::min<std::size_t>(SimServerStats::kTickHistBuckets - 1,
+                                              std::bit_width(busy_us))]
+        .fetch_add(1);
     if (busy_us > stats_.tick_busy_max_us.load()) {
       stats_.tick_busy_max_us.store(busy_us);  // Sim thread is the only writer.
     }

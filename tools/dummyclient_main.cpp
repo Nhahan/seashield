@@ -4,6 +4,12 @@
 //               [--role observer|commander|weapons|solo] [--duration 5]
 //               [--fire-after 1.0] [--fire-az-deg 38] [--fire-el-deg 12]
 //               [--salvo 8] [--dispersion-mrad 5]
+//               [--ack] [--fire-count N] [--fire-interval S]
+//
+// --ack assembles snapshots and acks them — the server then switches the
+// client to the v4 delta stream (the production console's behaviour); the
+// kbps column makes the full-vs-delta downlink comparison (P6 보고서).
+// --fire-count/--fire-interval repeat volleys for stress entity counts.
 //
 // With N > 1, client 0 takes the requested role and the rest observe (the
 // CIC has one weapons console but any number of spectators). --udp-port
@@ -91,13 +97,23 @@ bool parse_args(int argc, char** argv, Options& opts) {
       fire_el_deg = v;
       fire_dir_set = true;
     } else if (arg == "--salvo") {
-      const long v = next_long(1, 64);
+      const long v = next_long(1, 512);  // Stress runs go far past a real launcher.
       if (v < 1) return false;
       opts.client.fire.salvo_count = static_cast<std::uint16_t>(v);
     } else if (arg == "--dispersion-mrad") {
       const double v = next_double(0.0, 50.0);
       if (v < 0.0) return false;
       opts.client.fire.dispersion_mrad = v;
+    } else if (arg == "--ack") {
+      opts.client.ack_snapshots = true;
+    } else if (arg == "--fire-count") {
+      const long v = next_long(1, 64);
+      if (v < 1) return false;
+      opts.client.fire_count = static_cast<int>(v);
+    } else if (arg == "--fire-interval") {
+      const double v = next_double(0.01, 60.0);
+      if (v < 0.01) return false;
+      opts.client.fire_interval_s = v;
     } else {
       return false;
     }
@@ -128,7 +144,8 @@ int main(int argc, char** argv) {
     std::fprintf(stderr,
                  "usage: %s --port N [--host H] [--udp-port N] [--clients N] [--role R] "
                  "[--duration S] [--fire-after S] [--fire-az-deg D] [--fire-el-deg D] "
-                 "[--salvo N] [--dispersion-mrad M]\n",
+                 "[--salvo N] [--dispersion-mrad M] [--ack] [--fire-count N] "
+                 "[--fire-interval S]\n",
                  argv[0]);
     return 2;
   }
@@ -157,16 +174,25 @@ int main(int argc, char** argv) {
   }
 
   bool ok = true;
-  std::printf("\n%-7s %-10s %-10s %-8s %-8s %-7s %s\n", "client", "role", "snapshots", "ticks",
-              "events", "dup", "status");
+  std::printf("\n%-7s %-10s %-10s %-8s %-8s %-9s %-9s %-9s %-7s %s\n", "client", "role",
+              "snapshots", "ticks", "events", "asm/delta", "kB", "kbps", "dup", "status");
   for (std::size_t i = 0; i < reports.size(); ++i) {
     const auto& r = reports[i];
-    const bool healthy = r.welcomed && r.udp_bound && r.snapshot_ticks > 1 &&
-                         !r.duplicate_event && !r.disconnected_early && r.error.empty();
+    // --ack clients assemble instead of counting raw full ticks, so accept
+    // either liveness signal.
+    const bool flowing = r.snapshot_ticks > 1 || r.assembled_ticks > 1;
+    const bool healthy = r.welcomed && r.udp_bound && flowing && !r.duplicate_event &&
+                         !r.disconnected_early && r.error.empty();
     ok = ok && healthy;
-    std::printf("%-7zu %-10s %-10llu %-8llu %-8zu %-7s %s\n", i, role_name(r.role),
-                static_cast<unsigned long long>(r.snapshot_batches),
-                static_cast<unsigned long long>(r.snapshot_ticks), r.events.size(),
+    char assembled[32];
+    std::snprintf(assembled, sizeof(assembled), "%llu/%llu",
+                  static_cast<unsigned long long>(r.assembled_ticks),
+                  static_cast<unsigned long long>(r.delta_assembled_ticks));
+    std::printf("%-7zu %-10s %-10llu %-8llu %-8zu %-9s %-9.1f %-9.1f %-7s %s\n", i,
+                role_name(r.role), static_cast<unsigned long long>(r.snapshot_batches),
+                static_cast<unsigned long long>(r.snapshot_ticks), r.events.size(), assembled,
+                static_cast<double>(r.udp_bytes) / 1000.0,
+                static_cast<double>(r.udp_bytes) * 8.0 / opts.client.duration_s / 1000.0,
                 r.duplicate_event ? "YES" : "no",
                 healthy          ? "ok"
                 : !r.error.empty() ? r.error.c_str()
@@ -175,7 +201,7 @@ int main(int argc, char** argv) {
   if (!reports.empty() && reports[0].welcomed) {
     std::printf("\nweather: %s\nlast tick %u, %u entities, phase %s\n",
                 reports[0].weather_summary.c_str(), reports[0].last_tick,
-                reports[0].last_total_entities,
+                std::max(reports[0].last_total_entities, reports[0].last_assembled_entities),
                 reports[0].last_phase == seashield::protocol::EngagementPhase::kEnded ? "ended"
                                                                                       : "running");
   }
