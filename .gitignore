@@ -19,3 +19,6 @@ cmake-build-*/
 
 # Internal working documents (not published)
 docs/internal/
+
+# Procedural asset outputs (regenerated from the scripts in tools/assets/)
+tools/assets/out/
