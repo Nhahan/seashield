@@ -47,6 +47,16 @@ add_library(seashield_protocol STATIC
 )
 target_include_directories(seashield_protocol PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Client presentation core (charter §7, P5): snapshot reassembly, the
+# interpolation buffer and the ENU<->UE frame mapping. std-only on top of
+# the protocol library — the UE module compiles these sources directly while
+# the logic stays testable headlessly, same recipe as protocol/.
+add_library(seashield_clientcore STATIC
+  client/core/client_session.cpp
+  client/core/interp_buffer.cpp
+)
+target_link_libraries(seashield_clientcore PUBLIC seashield_protocol)
+
 add_library(seashield_core STATIC
   core/logger.cpp
   sim/ballistics.cpp
@@ -77,7 +87,8 @@ add_library(seashield_app STATIC
   tools/experiment/experiment.cpp
   tools/net_chaos_proxy.cpp
 )
-target_link_libraries(seashield_app PUBLIC seashield_core seashield_protocol)
+target_link_libraries(seashield_app PUBLIC seashield_core seashield_protocol
+                                           seashield_clientcore)
 
 add_executable(seashield_server server/main.cpp)
 target_link_libraries(seashield_server PRIVATE seashield_app)
@@ -109,6 +120,8 @@ if(SEASHIELD_BUILD_TESTS)
   enable_testing()
   add_executable(seashield_tests
     tests/ballistics_test.cpp
+    tests/client_core_test.cpp
+    tests/client_session_test.cpp
     tests/determinism_test.cpp
     tests/engagement_test.cpp
     tests/environment_test.cpp
@@ -133,7 +146,8 @@ if(SEASHIELD_BUILD_TESTS)
     tests/wire_test.cpp
     tests/world_test.cpp
   )
-  target_link_libraries(seashield_tests PRIVATE seashield_app GTest::gtest_main)
+  target_link_libraries(seashield_tests PRIVATE seashield_app seashield_clientcore
+                                                GTest::gtest_main)
   target_compile_definitions(seashield_tests
     PRIVATE SEASHIELD_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
