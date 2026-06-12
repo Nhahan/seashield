@@ -12,5 +12,9 @@ public class SeaShield : ModuleRules
 			"Core", "CoreUObject", "Engine", "InputCore", "UMG", "Slate", "SlateCore",
 			"Niagara", "SeaShieldCore"
 		});
+
+		// Water plugin API (ocean body / gerstner waves wiring in
+		// SeaLevelSetupLibrary — the asset-reference types are not scriptable).
+		PrivateDependencyModuleNames.Add("Water");
 	}
 }

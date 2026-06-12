@@ -3,7 +3,7 @@
 > Project SeaShield — P5 클라이언트(표현 계층)의 구현 기준 문서.
 > 상위 문서: [01-기획서.md](../01-기획서.md) §7 (UE5 클라이언트 개요), §3.2 (운용석), [protocol-spec.md](protocol-spec.md) v1.2.
 >
-> 문서 버전: v0.9 (2026-06-11) · 상태: K0~K3 완료 / K1 컴파일·K4~K6 에디터 작업 대기 (UE 설치 후)
+> 문서 버전: v1.0 (2026-06-12) · 상태: K0~K3 완료(K1 UE 빌드·실서버 E2E, K2 액터 측 포함) / K4~K6 에디터 작업 대기
 
 ---
 
@@ -130,7 +130,14 @@ client/SeaShield/
 ## 9. 현재 상태와 잔여 (P5 체크리스트)
 
 - ✅ K0 서버측 protocol v3 (전 매트릭스 그린) / ✅ K3 에셋 파이프라인 /
-  ✅ K2 로직 절반(클라 코어, E2E 포함 헤드리스 검증) / ✅ K1·K4·K5의 C++ 작성분
-- ⏳ UE 설치 후: SeaShieldCore 링크 스파이크(첫 빌드+수정) → PIE 스모크 →
-  에셋 임포트·BP 연결 → 바다/하늘/Niagara 에디터 작업 → 사통 패널 UMG →
-  60fps 계측 → 협동 시연 영상
+  ✅ K1 — SeaShieldEditor 빌드 그린(심볼 가시성 force-include 1건 수정) +
+  헤드리스 -game 스모크 + 실서버 E2E(`-SeaServer=host[:port] -SeaRole=` 자동
+  접속 → welcome·스냅샷 파이프라인 로그) / ✅ K2 — 액터 측 포함: 클래스 미지정
+  킨드는 절차 메시 폴백(AStaticMeshActor, 기수 +Y → -90° yaw 보정), 게임모드가
+  매니저·환경 컨트롤러를 BeginPlay에 보장(레벨은 장식만 담당), E2E에서 액터
+  스폰·ENU→UE 위치 일치 확인
+- 헤드리스 에디터 자동화: `Tools/import_assets.py`(메시 6종 × LOD4 임포트·체인
+  조립 — 풀 에디터 `-nullrhi -ExecCmds="py ..."`로 실행, 커맨드릿은 Slate 부재로
+  불가), `Tools/setup_level.py`(L_Range 기본 무대 — 실 RHI 필요)
+- ⏳ 에디터 작업(실 RHI): L_Range 채우기 → 바다/하늘/Niagara → 머티리얼 →
+  사통 패널 UMG → 60fps 계측 → 협동 시연 영상
