@@ -16,6 +16,12 @@ public class SeaShieldCore : ModuleRules
 		CppStandard = CppStandardVersion.Cpp20;
 		bUseUnity = false; // The repo TUs rely on per-file anonymous namespaces.
 
+		// The repo sources carry no *_API export macros, and modular editor
+		// builds compile with hidden symbol visibility by default — without
+		// this the game module fails to link against this dylib. The pragma
+		// is force-included so the shared sources stay UE-agnostic.
+		ForceIncludeFiles.Add(Path.Combine(ModuleDirectory, "SeaShieldCoreSymbols.h"));
+
 		PublicDependencyModuleNames.Add("Core");
 
 		// Repo root, so the symlinked sources' includes ("protocol/wire.h",

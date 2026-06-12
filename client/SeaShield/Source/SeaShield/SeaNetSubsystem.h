@@ -120,6 +120,7 @@ public:
 	FSeaEngagementEventSignature OnEngagementEvent;
 
 	// --- UGameInstanceSubsystem ---
+	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
 
 	// --- FTickableGameObject: drain the network-thread queues every frame ---
@@ -138,6 +139,7 @@ private:
 	seashield::client::SnapshotAssembler Assembler;
 	seashield::client::InterpolationBuffer Interp;
 	bool bWelcomed = false;
+	bool bLoggedFirstSnapshot = false;
 	ESeaRole AssignedRole = ESeaRole::Observer;
 	FSeaWeather Weather;
 	TMap<int32, FSeaFireSolution> LatestSolutions;

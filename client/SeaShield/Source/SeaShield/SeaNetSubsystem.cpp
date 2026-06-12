@@ -3,10 +3,14 @@
 #include "Containers/Queue.h"
 #include "HAL/Runnable.h"
 #include "HAL/RunnableThread.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 
 #include "client/core/client_session.h"
 #include "client/core/coords.h"
 #include "protocol/messages.h"
+
+DEFINE_LOG_CATEGORY_STATIC(LogSeaShield, Log, All);
 
 namespace protocol = seashield::protocol;
 
@@ -91,10 +95,39 @@ private:
 		callbacks.on_event = [this](const protocol::EngagementEvent& event) { Events.Enqueue(event); };
 		callbacks.on_fire_solution = [this](const protocol::FireSolution& solution) { Solutions.Enqueue(solution); };
 		callbacks.on_error = [](const std::string& what)
-		{ UE_LOG(LogTemp, Warning, TEXT("SeaShield net: %hs"), what.c_str()); };
+		{ UE_LOG(LogSeaShield, Warning, TEXT("net: %hs"), what.c_str()); };
 		return callbacks;
 	}
 };
+
+void USeaNetSubsystem::Initialize(FSubsystemCollectionBase& Collection)
+{
+	Super::Initialize(Collection);
+	// Development path (headless smoke, quick PIE iteration): connect straight
+	// from the command line, no Blueprint wiring needed.
+	//   -SeaServer=host[:port] [-SeaRole=observer|commander|weapons|solo]
+	FString Server;
+	if (!FParse::Value(FCommandLine::Get(), TEXT("SeaServer="), Server))
+	{
+		return;
+	}
+	FString Host = Server;
+	FString PortStr;
+	int32 Port = 7777;  // Server default (server/main.cpp).
+	if (Server.Split(TEXT(":"), &Host, &PortStr))
+	{
+		Port = FCString::Atoi(*PortStr);
+	}
+	FString RoleStr;
+	FParse::Value(FCommandLine::Get(), TEXT("SeaRole="), RoleStr);
+	ESeaRole Role = ESeaRole::Solo;
+	if (RoleStr.Equals(TEXT("observer"), ESearchCase::IgnoreCase)) { Role = ESeaRole::Observer; }
+	else if (RoleStr.Equals(TEXT("commander"), ESearchCase::IgnoreCase)) { Role = ESeaRole::Commander; }
+	else if (RoleStr.Equals(TEXT("weapons"), ESearchCase::IgnoreCase)) { Role = ESeaRole::Weapons; }
+	const bool bStarted = Connect(Host, Port, Role);
+	UE_LOG(LogSeaShield, Display, TEXT("Auto-connect to %s:%d -> %s"), *Host, Port,
+	       bStarted ? TEXT("session thread started") : TEXT("FAILED to start"));
+}
 
 bool USeaNetSubsystem::Connect(const FString& Host, int32 TcpPort, ESeaRole Role)
 {
@@ -146,12 +179,22 @@ void USeaNetSubsystem::Tick(float)
 		Weather.WindCms = enu_to_ue(welcome.surface_wind_east_mps, welcome.surface_wind_north_mps, 0.0);
 		Weather.RainIntensity = static_cast<float>(welcome.rain_intensity);
 		Weather.GustSigmaMps = static_cast<float>(welcome.gust_sigma_mps);
+		UE_LOG(LogSeaShield, Display,
+		       TEXT("Welcomed: role=%d wind=(%.1f, %.1f) m/s rain=%.2f gust_sigma=%.2f"),
+		       static_cast<int32>(AssignedRole), welcome.surface_wind_east_mps,
+		       welcome.surface_wind_north_mps, Weather.RainIntensity, Weather.GustSigmaMps);
 	}
 	protocol::Snapshot batch;
 	while (Runnable->Snapshots.Dequeue(batch))
 	{
 		if (auto done = Assembler.push(batch))
 		{
+			if (!bLoggedFirstSnapshot)
+			{
+				bLoggedFirstSnapshot = true;
+				UE_LOG(LogSeaShield, Display, TEXT("Snapshot pipeline live: first completed tick=%u (%d entities)"),
+				       done->tick, static_cast<int32>(done->entities.size()));
+			}
 			// Acking switches this client to the delta stream (protocol v4).
 			Runnable->Session.ack_snapshot(done->tick);
 			Interp.push(MoveTemp(*done));
