@@ -82,6 +82,11 @@ void ServerWelcome::encode(Writer& w) const {
   w.u16(tick_rate_hz);
   w.u16(snapshot_rate_hz);
   w.str16(std::string_view(weather_summary).substr(0, 512));
+  w.f32(static_cast<float>(surface_wind_east_mps));
+  w.f32(static_cast<float>(surface_wind_north_mps));
+  w.f32(static_cast<float>(rain_intensity));
+  w.f32(static_cast<float>(gust_sigma_mps));
+  w.u32(udp_nonce);
 }
 
 std::optional<ServerWelcome> ServerWelcome::decode(Reader& r) {
@@ -92,7 +97,14 @@ std::optional<ServerWelcome> ServerWelcome::decode(Reader& r) {
   m.tick_rate_hz = r.u16();
   m.snapshot_rate_hz = r.u16();
   m.weather_summary = r.str16();
-  if (!r.ok() || !valid_role(role) || m.weather_summary.size() > 512) {
+  m.surface_wind_east_mps = r.f32();
+  m.surface_wind_north_mps = r.f32();
+  m.rain_intensity = r.f32();
+  m.gust_sigma_mps = r.f32();
+  m.udp_nonce = r.u32();
+  // Negated comparisons so NaN payloads fail closed.
+  if (!r.ok() || !valid_role(role) || m.weather_summary.size() > 512 ||
+      !(m.rain_intensity >= 0.0 && m.rain_intensity <= 1.0) || !(m.gust_sigma_mps >= 0.0)) {
     return std::nullopt;
   }
   m.role = static_cast<Role>(role);
@@ -138,11 +150,40 @@ std::optional<FireRequest> FireRequest::decode(Reader& r) {
 
 // --- UdpHello / UdpHelloAck / Keepalive ---------------------------------------
 
-void UdpHello::encode(Writer& w) const { w.u64(token); }
+void UdpHello::encode(Writer& w) const {
+  w.u64(token);
+  w.u32(nonce);
+}
 
 std::optional<UdpHello> UdpHello::decode(Reader& r) {
   UdpHello m;
   m.token = r.u64();
+  m.nonce = r.u32();
+  if (!r.ok()) {
+    return std::nullopt;
+  }
+  return m;
+}
+
+void EventBacklog::encode(Writer& w) const {
+  const std::size_t count = std::min<std::size_t>(events.size(), 255);
+  w.u8(static_cast<std::uint8_t>(count));
+  for (std::size_t i = 0; i < count; ++i) {
+    events[i].encode(w);
+  }
+}
+
+std::optional<EventBacklog> EventBacklog::decode(Reader& r) {
+  EventBacklog m;
+  const std::uint8_t count = r.u8();
+  m.events.reserve(count);
+  for (std::uint8_t i = 0; i < count; ++i) {
+    auto event = EngagementEvent::decode(r);
+    if (!event.has_value()) {
+      return std::nullopt;
+    }
+    m.events.push_back(*event);
+  }
   if (!r.ok()) {
     return std::nullopt;
   }
@@ -188,6 +229,202 @@ std::optional<EntityRecord> EntityRecord::decode(Reader& r) {
     return std::nullopt;
   }
   m.kind = static_cast<EntityKind>(kind);
+  return m;
+}
+
+// --- Delta compression (v4) --------------------------------------------------
+
+void SnapshotAck::encode(Writer& w) const { w.u32(tick); }
+
+std::optional<SnapshotAck> SnapshotAck::decode(Reader& r) {
+  SnapshotAck m;
+  m.tick = r.u32();
+  if (!r.ok()) {
+    return std::nullopt;
+  }
+  return m;
+}
+
+std::size_t DeltaEntity::encoded_size() const {
+  if ((mask & kFullRecord) != 0) {
+    return 3 + kEntityRecordBytes;
+  }
+  return 3 + ((mask & kStateChanged) != 0 ? 1 : 0) + ((mask & kFlagsChanged) != 0 ? 1 : 0) + 6;
+}
+
+void DeltaEntity::encode(Writer& w) const {
+  w.u8(mask);
+  w.u16(id);
+  if ((mask & kFullRecord) != 0) {
+    full.encode(w);
+    return;
+  }
+  if ((mask & kStateChanged) != 0) {
+    w.u8(state);
+  }
+  if ((mask & kFlagsChanged) != 0) {
+    w.u8(flags);
+  }
+  for (const std::int8_t v : res_pos) {
+    w.u8(static_cast<std::uint8_t>(v));
+  }
+  for (const std::int8_t v : res_vel) {
+    w.u8(static_cast<std::uint8_t>(v));
+  }
+}
+
+std::optional<DeltaEntity> DeltaEntity::decode(Reader& r) {
+  DeltaEntity m;
+  m.mask = r.u8();
+  m.id = r.u16();
+  if ((m.mask & ~(kStateChanged | kFlagsChanged | kFullRecord |
+                  (0x3u << kKindShift))) != 0 ||
+      !valid_entity_kind(static_cast<std::uint8_t>((m.mask >> kKindShift) & 0x3))) {
+    return std::nullopt;  // Reserved mask bits / unknown kind: strict reject.
+  }
+  if ((m.mask & kFullRecord) != 0) {
+    const auto full = EntityRecord::decode(r);
+    if (!full.has_value()) {
+      return std::nullopt;
+    }
+    m.full = *full;
+    return m;
+  }
+  if ((m.mask & kStateChanged) != 0) {
+    m.state = r.u8();
+  }
+  if ((m.mask & kFlagsChanged) != 0) {
+    m.flags = r.u8();
+  }
+  for (std::int8_t& v : m.res_pos) {
+    v = static_cast<std::int8_t>(r.u8());
+  }
+  for (std::int8_t& v : m.res_vel) {
+    v = static_cast<std::int8_t>(r.u8());
+  }
+  if (!r.ok()) {
+    return std::nullopt;
+  }
+  return m;
+}
+
+namespace {
+
+bool fits_i8(std::int64_t v) { return v >= INT8_MIN && v <= INT8_MAX; }
+
+}  // namespace
+
+DeltaEntity make_delta_entity(const EntityRecord& base, const EntityRecord& current,
+                              std::uint32_t dticks, std::uint16_t tick_rate_hz) {
+  DeltaEntity delta;
+  delta.id = current.id;
+  delta.mask = static_cast<std::uint8_t>(static_cast<std::uint8_t>(current.kind)
+                                         << DeltaEntity::kKindShift);
+
+  const std::int32_t base_pos_q[3] = {quantize_position(base.pos_x), quantize_position(base.pos_y),
+                                      quantize_position(base.pos_z)};
+  const std::int16_t base_vel_q[3] = {quantize_velocity(base.vel_x), quantize_velocity(base.vel_y),
+                                      quantize_velocity(base.vel_z)};
+  const std::int32_t cur_pos_q[3] = {quantize_position(current.pos_x),
+                                     quantize_position(current.pos_y),
+                                     quantize_position(current.pos_z)};
+  const std::int16_t cur_vel_q[3] = {quantize_velocity(current.vel_x),
+                                     quantize_velocity(current.vel_y),
+                                     quantize_velocity(current.vel_z)};
+
+  std::int64_t res_pos[3];
+  std::int64_t res_vel[3];
+  bool fits = base.kind == current.kind;
+  for (int axis = 0; axis < 3 && fits; ++axis) {
+    res_pos[axis] = static_cast<std::int64_t>(cur_pos_q[axis]) -
+                    predict_position_q(base_pos_q[axis], base_vel_q[axis], dticks, tick_rate_hz);
+    res_vel[axis] = static_cast<std::int64_t>(cur_vel_q[axis]) - base_vel_q[axis];
+    fits = fits_i8(res_pos[axis]) && fits_i8(res_vel[axis]);
+  }
+  if (!fits) {
+    delta.mask |= DeltaEntity::kFullRecord;
+    delta.full = current;
+    return delta;
+  }
+  for (int axis = 0; axis < 3; ++axis) {
+    delta.res_pos[axis] = static_cast<std::int8_t>(res_pos[axis]);
+    delta.res_vel[axis] = static_cast<std::int8_t>(res_vel[axis]);
+  }
+  if (current.state != base.state) {
+    delta.mask |= DeltaEntity::kStateChanged;
+    delta.state = current.state;
+  }
+  if (current.flags != base.flags) {
+    delta.mask |= DeltaEntity::kFlagsChanged;
+    delta.flags = current.flags;
+  }
+  return delta;
+}
+
+EntityRecord apply_delta_entity(const EntityRecord& base, const DeltaEntity& delta,
+                                std::uint32_t dticks, std::uint16_t tick_rate_hz) {
+  if ((delta.mask & DeltaEntity::kFullRecord) != 0) {
+    return delta.full;
+  }
+  EntityRecord out = base;
+  out.id = delta.id;
+  for (int axis = 0; axis < 3; ++axis) {
+    const std::int32_t base_pos_q = quantize_position(axis == 0   ? base.pos_x
+                                                      : axis == 1 ? base.pos_y
+                                                                  : base.pos_z);
+    const std::int16_t base_vel_q = quantize_velocity(axis == 0   ? base.vel_x
+                                                      : axis == 1 ? base.vel_y
+                                                                  : base.vel_z);
+    const double pos = dequantize_position(
+        predict_position_q(base_pos_q, base_vel_q, dticks, tick_rate_hz) + delta.res_pos[axis]);
+    const double vel = dequantize_velocity(
+        static_cast<std::int16_t>(base_vel_q + delta.res_vel[axis]));
+    (axis == 0 ? out.pos_x : axis == 1 ? out.pos_y : out.pos_z) = pos;
+    (axis == 0 ? out.vel_x : axis == 1 ? out.vel_y : out.vel_z) = vel;
+  }
+  if ((delta.mask & DeltaEntity::kStateChanged) != 0) {
+    out.state = delta.state;
+  }
+  if ((delta.mask & DeltaEntity::kFlagsChanged) != 0) {
+    out.flags = delta.flags;
+  }
+  return out;
+}
+
+void SnapshotDelta::encode(Writer& w) const {
+  w.u32(tick);
+  w.u32(base_tick);
+  w.u8(static_cast<std::uint8_t>(phase));
+  w.u16(total_entities);
+  w.u16(first_index);
+  const std::size_t count = std::min<std::size_t>(entities.size(), 255);
+  w.u8(static_cast<std::uint8_t>(count));
+  for (std::size_t i = 0; i < count; ++i) {
+    entities[i].encode(w);
+  }
+}
+
+std::optional<SnapshotDelta> SnapshotDelta::decode(Reader& r) {
+  SnapshotDelta m;
+  m.tick = r.u32();
+  m.base_tick = r.u32();
+  const std::uint8_t phase = r.u8();
+  m.total_entities = r.u16();
+  m.first_index = r.u16();
+  const std::uint8_t count = r.u8();
+  if (!r.ok() || !valid_phase(phase) || m.base_tick >= m.tick ||
+      static_cast<std::size_t>(m.first_index) + count > m.total_entities) {
+    return std::nullopt;
+  }
+  m.phase = static_cast<EngagementPhase>(phase);
+  m.entities.reserve(count);
+  for (std::uint8_t i = 0; i < count; ++i) {
+    auto entity = DeltaEntity::decode(r);
+    if (!entity.has_value()) {
+      return std::nullopt;
+    }
+    m.entities.push_back(std::move(*entity));
+  }
   return m;
 }
 
@@ -329,6 +566,8 @@ std::optional<ControlMessage> decode_control_frame(std::span<const std::uint8_t>
       return decode_control_as<ServerReject>(r);
     case MsgType::kFireRequest:
       return decode_control_as<FireRequest>(r);
+    case MsgType::kEventBacklog:
+      return decode_control_as<EventBacklog>(r);
     default:
       return std::nullopt;
   }
@@ -349,6 +588,10 @@ std::optional<DataMessage> decode_data_message(MsgType type, std::span<const std
       return decode_data_as<EngagementEvent>(r);
     case MsgType::kFireSolution:
       return decode_data_as<FireSolution>(r);
+    case MsgType::kSnapshotAck:
+      return decode_data_as<SnapshotAck>(r);
+    case MsgType::kSnapshotDelta:
+      return decode_data_as<SnapshotDelta>(r);
     default:
       return std::nullopt;
   }

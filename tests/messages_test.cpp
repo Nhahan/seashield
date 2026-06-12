@@ -40,6 +40,10 @@ TEST(MessagesTest, ServerWelcomeRoundTripWithWeatherSummary) {
   welcome.role = Role::kSolo;
   welcome.udp_port = 7778;
   welcome.weather_summary = "wind 8.2 m/s from 240°, rain 0.3";
+  welcome.surface_wind_east_mps = -7.1;
+  welcome.surface_wind_north_mps = 4.25;
+  welcome.rain_intensity = 0.3;
+  welcome.gust_sigma_mps = 1.5;
 
   const auto decoded = control_round_trip(welcome);
   ASSERT_TRUE(decoded.has_value());
@@ -51,6 +55,132 @@ TEST(MessagesTest, ServerWelcomeRoundTripWithWeatherSummary) {
   EXPECT_EQ(m->tick_rate_hz, 60);
   EXPECT_EQ(m->snapshot_rate_hz, 30);
   EXPECT_EQ(m->weather_summary, "wind 8.2 m/s from 240°, rain 0.3");
+  // v3 visual-driver scalars travel as f32: exact at these literals.
+  EXPECT_DOUBLE_EQ(m->surface_wind_east_mps, -7.1F);
+  EXPECT_DOUBLE_EQ(m->surface_wind_north_mps, 4.25);
+  EXPECT_DOUBLE_EQ(m->rain_intensity, 0.3F);
+  EXPECT_DOUBLE_EQ(m->gust_sigma_mps, 1.5);
+}
+
+TEST(MessagesTest, SnapshotAckRoundTrip) {
+  SnapshotAck ack;
+  ack.tick = 0xDEADBEEF;
+  Writer w;
+  ack.encode(w);
+  Reader r(w.data());
+  const auto decoded = SnapshotAck::decode(r);
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(decoded->tick, 0xDEADBEEFu);
+}
+
+TEST(MessagesTest, PredictPositionIsIntegerExactWithTruncation) {
+  // vel_q is 0.1 m/s = 10 cm/s; over dticks at 60 Hz the advance is
+  // (vel_q*10*dticks)/60 cm with ONE truncating division at the end.
+  EXPECT_EQ(predict_position_q(1000, 60, 2, 60), 1000 + 20);   // 6 m/s * 2 ticks.
+  EXPECT_EQ(predict_position_q(1000, -60, 2, 60), 1000 - 20);  // Symmetric for negatives.
+  EXPECT_EQ(predict_position_q(0, 1, 1, 60), 0);    // 10*1/60 truncates to 0.
+  EXPECT_EQ(predict_position_q(0, -1, 1, 60), 0);   // -10/60 truncates toward zero.
+  EXPECT_EQ(predict_position_q(0, 7, 5, 60), 5);    // 350/60 = 5.83 -> 5.
+}
+
+namespace {
+
+EntityRecord delta_test_entity(double pos_y, double vel_y, std::uint8_t state = 0) {
+  EntityRecord e;
+  e.id = 7;
+  e.kind = EntityKind::kRocket;
+  e.state = state;
+  e.pos_y = pos_y;
+  e.vel_y = vel_y;
+  return e;
+}
+
+}  // namespace
+
+TEST(MessagesTest, DeltaEntityResidualRoundTripsThroughWireAndApply) {
+  // 2 ticks of 60 m/s flight plus a small unmodeled (gravity-like) residual.
+  const EntityRecord base = delta_test_entity(100.0, 60.0);
+  EntityRecord current = delta_test_entity(102.0 - 0.04, 59.7, /*state=*/1);
+
+  DeltaEntity delta = make_delta_entity(base, current, 2, 60);
+  ASSERT_EQ(delta.mask & DeltaEntity::kFullRecord, 0) << "small residual must not escape";
+  EXPECT_NE(delta.mask & DeltaEntity::kStateChanged, 0);
+  EXPECT_EQ(delta.kind(), EntityKind::kRocket);
+
+  Writer w;
+  delta.encode(w);
+  EXPECT_EQ(w.size(), delta.encoded_size());
+  Reader r(w.data());
+  const auto decoded = DeltaEntity::decode(r);
+  ASSERT_TRUE(decoded.has_value());
+
+  const EntityRecord applied = apply_delta_entity(base, *decoded, 2, 60);
+  // The reconstruction matches the QUANTIZED truth — the same fidelity a
+  // full snapshot would have delivered.
+  EXPECT_DOUBLE_EQ(applied.pos_y, dequantize_position(quantize_position(current.pos_y)));
+  EXPECT_DOUBLE_EQ(applied.vel_y, dequantize_velocity(quantize_velocity(current.vel_y)));
+  EXPECT_EQ(applied.state, 1);
+  EXPECT_EQ(applied.kind, EntityKind::kRocket);
+}
+
+TEST(MessagesTest, DeltaEntityEscapesToFullRecordOnBigJump) {
+  const EntityRecord base = delta_test_entity(100.0, 60.0);
+  const EntityRecord current = delta_test_entity(500.0, 60.0);  // ~398 m off prediction.
+
+  const DeltaEntity delta = make_delta_entity(base, current, 2, 60);
+  ASSERT_NE(delta.mask & DeltaEntity::kFullRecord, 0);
+  const EntityRecord applied = apply_delta_entity(base, delta, 2, 60);
+  EXPECT_DOUBLE_EQ(applied.pos_y, current.pos_y);
+}
+
+TEST(MessagesTest, SnapshotDeltaRoundTripAndStrictValidation) {
+  SnapshotDelta delta;
+  delta.tick = 120;
+  delta.base_tick = 118;
+  delta.total_entities = 2;
+  delta.first_index = 0;
+  delta.entities.push_back(make_delta_entity(delta_test_entity(100.0, 60.0),
+                                             delta_test_entity(102.0, 60.0), 2, 60));
+  DeltaEntity escape;
+  escape.id = 9;
+  escape.mask = static_cast<std::uint8_t>(
+      (static_cast<std::uint8_t>(EntityKind::kTrack) << DeltaEntity::kKindShift) |
+      DeltaEntity::kFullRecord);
+  escape.full = delta_test_entity(7.0, 1.0);
+  delta.entities.push_back(escape);
+
+  Writer w;
+  delta.encode(w);
+  Reader r(w.data());
+  const auto decoded = SnapshotDelta::decode(r);
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(decoded->base_tick, 118u);
+  ASSERT_EQ(decoded->entities.size(), 2u);
+  EXPECT_EQ(decoded->entities[1].kind(), EntityKind::kTrack);
+
+  // base_tick >= tick is wire garbage: strict reject.
+  delta.base_tick = 120;
+  Writer bad;
+  delta.encode(bad);
+  Reader bad_reader(bad.data());
+  EXPECT_FALSE(SnapshotDelta::decode(bad_reader).has_value());
+
+  // Reserved mask bits are rejected (forward-compat stays loud, not silent).
+  Writer tampered;
+  tampered.u8(0x80);  // Reserved bit set.
+  tampered.u16(1);
+  Reader tampered_reader(tampered.data());
+  EXPECT_FALSE(DeltaEntity::decode(tampered_reader).has_value());
+}
+
+TEST(MessagesTest, ServerWelcomeRejectsOutOfRangeWeather) {
+  ServerWelcome welcome;
+  welcome.rain_intensity = 1.5;  // Outside [0, 1]: strict decoder refuses.
+  EXPECT_FALSE(control_round_trip(welcome).has_value());
+
+  welcome.rain_intensity = 0.5;
+  welcome.gust_sigma_mps = -1.0;  // Negative σ is meaningless.
+  EXPECT_FALSE(control_round_trip(welcome).has_value());
 }
 
 TEST(MessagesTest, ServerRejectRoundTrip) {
