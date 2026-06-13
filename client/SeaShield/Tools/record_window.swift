@@ -21,12 +21,16 @@ _ = NSApplication.shared
 let cli = CommandLine.arguments
 guard cli.count >= 4, let seconds = Double(cli[2]) else {
 	FileHandle.standardError.write(
-		"usage: record_window <title-substring> <seconds> <out.mov> [fps]\n".data(using: .utf8)!)
+		"usage: record_window <title-substring> <seconds> <out.mov> [fps] [index]\n".data(using: .utf8)!)
 	exit(2)
 }
 let titleNeedle = cli[1]
 let outURL = URL(fileURLWithPath: cli[3])
 let fps: Int32 = cli.count > 4 ? Int32(cli[4]) ?? 60 : 60
+// Optional window index: when several windows share the title (e.g. multiple
+// co-op clients), pick the Nth sorted left-to-right by on-screen position.
+// Omitted -> largest window (the single-client default).
+let windowIndex: Int? = cli.count > 5 ? Int(cli[5]) : nil
 
 final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
 	let writer: AVAssetWriter
@@ -83,21 +87,34 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
 		input.markAsFinished()
 		let semaphore = DispatchSemaphore(value: 0)
 		writer.finishWriting { semaphore.signal() }
-		semaphore.wait()
+		// Bound the wait: when the captured window has already closed,
+		// finishWriting's completion can stall — don't block forever.
+		_ = semaphore.wait(timeout: .now() + 6)
 	}
 }
 
 func findWindow() async throws -> SCWindow? {
 	let content = try await SCShareableContent.excludingDesktopWindows(
 		true, onScreenWindowsOnly: true)
-	return content.windows
-		.filter { window in
-			let title = window.title ?? ""
-			let app = window.owningApplication?.applicationName ?? ""
-			return (title.contains(titleNeedle) || app.contains(titleNeedle))
-				&& window.frame.width > 400
-		}
-		.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
+	let matches = content.windows.filter { window in
+		let title = window.title ?? ""
+		let app = window.owningApplication?.applicationName ?? ""
+		return (title.contains(titleNeedle) || app.contains(titleNeedle))
+			&& window.frame.width > 400
+	}
+	guard let index = windowIndex else {
+		return matches.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
+	}
+	// Deterministic left-to-right ordering so a fixed index maps to a fixed
+	// on-screen client across the co-op clients (positioned via -WinX).
+	let ordered = matches.sorted {
+		$0.frame.origin.x != $1.frame.origin.x
+			? $0.frame.origin.x < $1.frame.origin.x
+			: $0.frame.origin.y < $1.frame.origin.y
+	}
+	// Only commit once all expected windows are up, so the index is stable.
+	guard ordered.count > index else { return nil }
+	return ordered[index]
 }
 
 let stopSignal = DispatchSemaphore(value: 0)
@@ -148,6 +165,13 @@ Task {
 
 	// Duration timeout OR early window-close, whichever first.
 	DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { stopSignal.signal() }
+	// Hard watchdog: nothing in the stop/finish path may keep this process
+	// alive past the deadline (finishWriting and stopCapture have both been
+	// observed to stall once the captured window closes — never hang again).
+	DispatchQueue.global().asyncAfter(deadline: .now() + seconds + 12) {
+		FileHandle.standardError.write("watchdog: forcing exit\n".data(using: .utf8)!)
+		exit(0)
+	}
 	stopSignal.wait()
 	try? await stream.stopCapture()
 	recorder.finish()
