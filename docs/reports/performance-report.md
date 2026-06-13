@@ -3,6 +3,9 @@
 > Project SeaShield — P6 산출물 (기획서 §9, §10.3). 부하·대역폭·틱 비용의 측정
 > 기준 문서. 측정 코드: `SimServerStats`(틱 히스토그램 포함), `dummyclient`
 > (`--ack`, `--fire-count`, kbps 계측). 1차 스모크 수치는 protocol-spec §10.
+> 범위: 본 문서는 **서버·와이어**를 다룬다 — 클라이언트 GPU 프레임 예산(1440p
+> 60fps)은 [client-design.md §8](../architecture/client-design.md), 측정 절차는
+> [client-runbook.md §5](../architecture/client-runbook.md)가 담당.
 >
 > 문서 버전: v1.0 (2026-06-12) · 환경: Apple M4 Max, macOS 15.6.1, 루프백,
 > **RelWithDebInfo** (결정론 FP 플래그 적용 상태 — Debug↔Rel 비트 동일 검증 완료)
