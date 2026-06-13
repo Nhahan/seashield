@@ -14,5 +14,16 @@ class SEASHIELD_API ASeaShieldGameModeBase : public AGameModeBase
 	GENERATED_BODY()
 
 public:
+	ASeaShieldGameModeBase();
+
 	virtual void BeginPlay() override;
+
+	// The level carries no PlayerStart (it is fully script-generated); without
+	// one the engine spawns at world zero — inside the Metal water defect the
+	// stage offset exists to avoid (SeaWorldFrame.h). Spawn a bridge-wing
+	// vantage near the ownship instead.
+	virtual AActor* ChoosePlayerStart_Implementation(AController* Player) override;
+
+private:
+	TWeakObjectPtr<AActor> LazyPlayerStart;
 };

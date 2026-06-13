@@ -140,7 +140,13 @@ private:
 	seashield::client::InterpolationBuffer Interp;
 	bool bWelcomed = false;
 	bool bLoggedFirstSnapshot = false;
+	int32 PendingDevSalvo = 0;   // -SeaFire=N: salvo once the solution settles.
+	int32 ValidSolutionStreak = 0;
 	ESeaRole AssignedRole = ESeaRole::Observer;
 	FSeaWeather Weather;
 	TMap<int32, FSeaFireSolution> LatestSolutions;
+	// (kind, subject, tick) dedup — the v4 bind-time TCP event backlog may
+	// overlap the live UDP stream at the boundary (client_session.cpp leaves
+	// dedup to the consumer by design).
+	TSet<uint64> SeenEventKeys;
 };

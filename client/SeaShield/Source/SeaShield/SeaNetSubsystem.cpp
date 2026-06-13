@@ -127,6 +127,9 @@ void USeaNetSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	const bool bStarted = Connect(Host, Port, Role);
 	UE_LOG(LogSeaShield, Display, TEXT("Auto-connect to %s:%d -> %s"), *Host, Port,
 	       bStarted ? TEXT("session thread started") : TEXT("FAILED to start"));
+	// Dev/demo: -SeaFire=N fires an N-rocket salvo at the first track that
+	// produces a valid fire solution (verification runs, capture sessions).
+	FParse::Value(FCommandLine::Get(), TEXT("SeaFire="), PendingDevSalvo);
 }
 
 bool USeaNetSubsystem::Connect(const FString& Host, int32 TcpPort, ESeaRole Role)
@@ -212,6 +215,15 @@ void USeaNetSubsystem::Tick(float)
 	protocol::EngagementEvent event;
 	while (Runnable->Events.Dequeue(event))
 	{
+		const uint64 EventKey = (static_cast<uint64>(event.kind) << 48) |
+		                        (static_cast<uint64>(event.subject_id) << 32) |
+		                        static_cast<uint64>(event.tick);
+		bool bAlreadySeen = false;
+		SeenEventKeys.Add(EventKey, &bAlreadySeen);
+		if (bAlreadySeen)
+		{
+			continue;
+		}
 		FSeaEngagementEvent out;
 		out.Kind = static_cast<uint8>(event.kind);
 		out.SubjectId = event.subject_id;
@@ -231,6 +243,21 @@ void USeaNetSubsystem::Tick(float)
 		out.TimeOfFlightS = solution.time_of_flight_s;
 		out.DispersionRadiusM = solution.dispersion_radius_m;
 		LatestSolutions.Add(out.TrackId, out);
+
+		if (PendingDevSalvo > 0 && out.bValid)
+		{
+			// Let the Kalman filter settle before committing the salvo —
+			// firing on the very first solution is the worst case the
+			// experiment report quantifies (settle-time effect, §2).
+			if (++ValidSolutionStreak >= 16)
+			{
+				UE_LOG(LogSeaShield, Display,
+				       TEXT("Dev salvo: firing %d rockets at track %d (ToF %.1f s)"),
+				       PendingDevSalvo, out.TrackId, out.TimeOfFlightS);
+				FireAtTrack(out.TrackId, 0.0f, 0.0f, PendingDevSalvo, 3.0f);
+				PendingDevSalvo = 0;
+			}
+		}
 	}
 }
 
