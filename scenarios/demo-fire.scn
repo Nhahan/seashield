@@ -1,0 +1,11 @@
+# 사격 검증·캡처용 — 표적을 멀리(15.6km) 두어 클라 부팅 선행시간에 면역
+weather_seed = 42
+sim_seed = 7
+gust_seed = 9
+duration_s = 120
+
+target_x = 10000
+target_y = 12000
+target_z = 800
+target_heading_deg = 230
+target_speed = 200
