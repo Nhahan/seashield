@@ -14,9 +14,11 @@
 
 #include "Blueprint/UserWidget.h"
 
+#include "SeaAfterActionWidget.h"
 #include "SeaEnvironmentController.h"
 #include "SeaFireControlPanel.h"
 #include "SeaPpiWidget.h"
+#include "SeaShieldPlayerController.h"
 #include "SeaWorldFrame.h"
 #include "SeaWorldManager.h"
 
@@ -39,6 +41,8 @@ ASeaShieldGameModeBase::ASeaShieldGameModeBase()
 	// The flying DefaultPawn carries a visible sphere mesh that photobombs
 	// captures; the spectator pawn flies the same but draws nothing.
 	DefaultPawnClass = ASpectatorPawn::StaticClass();
+	// Custom controller carries the weapons-operator input (fire order + fire).
+	PlayerControllerClass = ASeaShieldPlayerController::StaticClass();
 }
 
 AActor* ASeaShieldGameModeBase::ChoosePlayerStart_Implementation(AController* Player)
@@ -79,6 +83,13 @@ void ASeaShieldGameModeBase::BeginPlay()
 	{
 		Panel->PpiRef = Ppi;
 		Panel->AddToViewport(10);
+	}
+	// After-action review — hidden until the engagement ends (kEngagementEnd),
+	// then centered over the scene. Above the HUD layer so it reads as a card.
+	if (USeaAfterActionWidget* Aar =
+	        CreateWidget<USeaAfterActionWidget>(GetWorld(), USeaAfterActionWidget::StaticClass()))
+	{
+		Aar->AddToViewport(20);
 	}
 
 	// Dev capture path: -SeaShot=<seconds> frames the standard quarter view,

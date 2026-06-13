@@ -40,7 +40,7 @@ launch() { # role winx extra...
     >/dev/null 2>&1 &
 }
 launch commander 0
-launch weapons   860 -SeaFire=16
+launch weapons   860 -SeaOrderDemo
 launch observer  1720
 echo "launched 3 clients; all run concurrently (the co-op proof is server-side)."
 # Let the windows come up and the engagement develop (salvo airborne).

@@ -177,8 +177,8 @@ public:
 			{
 				Color = FLinearColor(1.0f, 0.75f, 0.25f, 0.9f);  // Coasting: amber.
 			}
-			const bool bSelected =
-			    Entity.Id == Data->SelectedTrackId && Data->SelectedTrackId != 0;
+			const int32 Designated = Net != nullptr ? Net->GetDesignatedTrack() : 0;
+			const bool bSelected = Entity.Id == Designated && Designated != 0;
 			const float Half = bSelected ? 10.0f : 7.0f;
 
 			// NTDS-style hostile caret (^).
@@ -213,9 +213,14 @@ public:
 				          {Pip + FVector2D(-6, -6), Pip + FVector2D(6, 6)}, PipColor, 1.6f);
 				DrawLines(OutDrawElements, LayerId + 3, AllottedGeometry,
 				          {Pip + FVector2D(-6, 6), Pip + FVector2D(6, -6)}, PipColor, 1.6f);
+				// The pattern circle reflects the OPERATOR's ordered dispersion
+				// (mrad x slant range), not the server's default-dispersion
+				// preview in Solution.DispersionRadiusM — so the scope shows the
+				// spread that will actually be fired as the order is adjusted.
+				const float PipRangeM = Solution.Pip.Size() / 100.0f;
+				const float OrderRadiusM = Net->GetOrderDispersionMrad() * 1.0e-3f * PipRangeM;
 				DrawLines(OutDrawElements, LayerId + 3, AllottedGeometry,
-				          CirclePoints(Pip, Solution.DispersionRadiusM * MetersToPx, 32), PipColor,
-				          0.9f);
+				          CirclePoints(Pip, OrderRadiusM * MetersToPx, 32), PipColor, 0.9f);
 			}
 		}
 		return LayerId + 4;
@@ -286,5 +291,16 @@ void USeaPpiWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 	{
 		ScopeHost->SetVisibility(bShowScope ? ESlateVisibility::Visible
 		                                    : ESlateVisibility::Collapsed);
+	}
+}
+
+void USeaPpiWidget::SelectTrack(int32 TrackId)
+{
+	if (const UGameInstance* GameInstance = GetGameInstance())
+	{
+		if (USeaNetSubsystem* Net = GameInstance->GetSubsystem<USeaNetSubsystem>())
+		{
+			Net->DesignateTrack(TrackId);
+		}
 	}
 }

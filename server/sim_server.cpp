@@ -761,6 +761,12 @@ void SimServer::sim_thread_main() {
       if (command.track_id != 0) {
         // Resolve the designated track HERE: the tracker belongs to this
         // thread. az/el arrived as operator trim on the solution.
+        // This is also the staleness gate for designated fire: solve_for_track
+        // returns nullopt for a track that is gone, unconfirmed, or has coasted
+        // past max_coast_scans (kStale), so an order against a stale/coasting
+        // track is dropped (counted) rather than fired blind. The operator sees
+        // it coming — the same gate makes the streamed solution invalid, so the
+        // console reads "NO SOLUTION" before the trigger is ever pulled.
         const auto solution = world.solve_for_track(command.track_id);
         if (!solution.has_value()) {
           stats_.track_solution_failures.fetch_add(1);
@@ -921,6 +927,11 @@ void SimServer::sim_thread_main() {
           fire_solution.pip_y = pip.y;
           fire_solution.pip_z = pip.z;
           fire_solution.time_of_flight_s = static_cast<float>(solution->time_of_flight_s);
+          // Preview pattern radius at the DEFAULT dispersion (1σ = mrad ×
+          // slant range). The streamed solution is computed continuously,
+          // before any operator order exists, so it cannot know the chosen
+          // dispersion; the console/PPI redraw the circle from the operator's
+          // own ordered dispersion (client-design / SeaFireControlPanel).
           fire_solution.dispersion_radius_m =
               static_cast<float>(sim::FireCommand{}.dispersion_mrad * 1e-3 * pip.norm());
         } else {

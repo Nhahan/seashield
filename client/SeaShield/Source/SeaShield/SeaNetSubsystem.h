@@ -116,6 +116,25 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "SeaShield")
 	void FireManual(float AzimuthDeg, float ElevationDeg, int32 SalvoCount, float DispersionMrad);
 
+	// --- Weapons command state (operator fire order) ---
+	// Designation is the single source of truth here: the PPI writes it on
+	// click, the console reads it, the controller fires it.
+	UFUNCTION(BlueprintCallable, Category = "SeaShield")
+	void DesignateTrack(int32 TrackId) { DesignatedTrackId = TrackId; }
+	UFUNCTION(BlueprintPure, Category = "SeaShield")
+	int32 GetDesignatedTrack() const { return DesignatedTrackId; }
+
+	UFUNCTION(BlueprintCallable, Category = "SeaShield") void AdjustSalvo(int32 Delta);
+	UFUNCTION(BlueprintCallable, Category = "SeaShield") void AdjustDispersion(float DeltaMrad);
+	UFUNCTION(BlueprintCallable, Category = "SeaShield") void AdjustTrim(float DeltaAzDeg, float DeltaElDeg);
+	// Fires the current order at the designated track (no-op if none / no link).
+	UFUNCTION(BlueprintCallable, Category = "SeaShield") void CommitFire();
+
+	UFUNCTION(BlueprintPure, Category = "SeaShield") int32 GetOrderSalvo() const { return OrderSalvo; }
+	UFUNCTION(BlueprintPure, Category = "SeaShield") float GetOrderDispersionMrad() const { return OrderDispersionMrad; }
+	UFUNCTION(BlueprintPure, Category = "SeaShield") float GetOrderAzTrimDeg() const { return OrderAzTrimDeg; }
+	UFUNCTION(BlueprintPure, Category = "SeaShield") float GetOrderElTrimDeg() const { return OrderElTrimDeg; }
+
 	UPROPERTY(BlueprintAssignable, Category = "SeaShield")
 	FSeaEngagementEventSignature OnEngagementEvent;
 
@@ -145,6 +164,11 @@ private:
 	ESeaRole AssignedRole = ESeaRole::Observer;
 	FSeaWeather Weather;
 	TMap<int32, FSeaFireSolution> LatestSolutions;
+	int32 DesignatedTrackId = 0;
+	int32 OrderSalvo = 8;            // rockets per salvo (1..16)
+	float OrderDispersionMrad = 3.0f;  // pattern spread (0..20)
+	float OrderAzTrimDeg = 0.0f;     // operator trim, server clamps to +-15
+	float OrderElTrimDeg = 0.0f;
 	// (kind, subject, tick) dedup — the v4 bind-time TCP event backlog may
 	// overlap the live UDP stream at the boundary (client_session.cpp leaves
 	// dedup to the consumer by design).

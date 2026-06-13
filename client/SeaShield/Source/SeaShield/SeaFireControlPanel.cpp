@@ -12,8 +12,8 @@
 
 namespace {
 
-constexpr float kPanelWidth = 416.0f;
-constexpr float kPanelHeight = 188.0f;
+constexpr float kPanelWidth = 432.0f;
+constexpr float kPanelHeight = 216.0f;
 constexpr float kRowHeight = 21.0f;
 constexpr float kPadX = 14.0f;
 constexpr float kPadY = 12.0f;
@@ -220,7 +220,7 @@ void USeaFireControlPanel::NativeTick(const FGeometry& MyGeometry, float InDelta
 	}
 
 	const FSeaWeather Weather = Net->GetWeather();
-	const int32 SelectedTrackId = PpiRef.IsValid() ? PpiRef->SelectedTrackId : 0;
+	const int32 SelectedTrackId = Net->GetDesignatedTrack();
 
 	CachedLines.Reset();
 	CachedLines.Add(TEXT("FIRE CONTROL"));
@@ -268,14 +268,24 @@ void USeaFireControlPanel::NativeTick(const FGeometry& MyGeometry, float InDelta
 	{
 		CachedLines.Add(FString::Printf(TEXT("SOL  VALID  PIP %s  TOF %4.1fS"),
 		                                *RangeBearing(Solution.Pip), Solution.TimeOfFlightS));
-		CachedLines.Add(
-		    FString::Printf(TEXT("     DISPERSION RADIUS %.0fM"), Solution.DispersionRadiusM));
+		// Pattern radius from the OPERATOR's ordered dispersion at the PIP
+		// slant range (the server streams a default-dispersion preview).
+		const float PipRangeM = Solution.Pip.Size() / 100.0f;
+		const float OrderRadiusM = Net->GetOrderDispersionMrad() * 1.0e-3f * PipRangeM;
+		CachedLines.Add(FString::Printf(TEXT("     PATTERN RADIUS %.0fM @ %.1fMR"), OrderRadiusM,
+		                                Net->GetOrderDispersionMrad()));
 	}
 	else
 	{
 		CachedLines.Add(TEXT("SOL  ---- NO SOLUTION"));
 		CachedLines.Add(TEXT(""));
 	}
+
+	// Operator fire order — adjustable from the keyboard (see key hints).
+	CachedLines.Add(FString::Printf(TEXT("ORDER SALVO %02d  DISP %.1fMR  TRIM %+.0f/%+.0f"),
+	                                Net->GetOrderSalvo(), Net->GetOrderDispersionMrad(),
+	                                Net->GetOrderAzTrimDeg(), Net->GetOrderElTrimDeg()));
+	CachedLines.Add(TEXT("[/] SALVO  ;' DISP  ARROWS TRIM  [F] FIRE"));
 
 	FString Tally = FString::Printf(TEXT("TALLY LCH %d SPL %d BST %d KILL %d"), Launches,
 	                                Splashes, Bursts, Kills);

@@ -43,11 +43,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SeaShield")
 	FLinearColor TrackColor = FLinearColor(0.45f, 1.0f, 0.55f);
 
-	UPROPERTY(BlueprintReadWrite, Category = "SeaShield")
-	int32 SelectedTrackId = 0;
-
+	// Designation lives in USeaNetSubsystem (the command channel); this just
+	// routes the click/demo selection there.
 	UFUNCTION(BlueprintCallable, Category = "SeaShield")
-	void SelectTrack(int32 TrackId) { SelectedTrackId = TrackId; }
+	void SelectTrack(int32 TrackId);
 
 	// Paint-side data access (SSeaPpiScope).
 	const TArray<FSeaEntityState>& Entities() const { return CachedEntities; }

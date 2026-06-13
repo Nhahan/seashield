@@ -296,6 +296,37 @@ bool USeaNetSubsystem::GetFireSolution(int32 TrackId, FSeaFireSolution& OutSolut
 	return false;
 }
 
+void USeaNetSubsystem::AdjustSalvo(int32 Delta)
+{
+	OrderSalvo = FMath::Clamp(OrderSalvo + Delta, 1, 16);
+}
+
+void USeaNetSubsystem::AdjustDispersion(float DeltaMrad)
+{
+	OrderDispersionMrad = FMath::Clamp(OrderDispersionMrad + DeltaMrad, 0.0f, 20.0f);
+}
+
+void USeaNetSubsystem::AdjustTrim(float DeltaAzDeg, float DeltaElDeg)
+{
+	// Mirror the server's operator-trim clamp (+-15 deg) so the console never
+	// shows an order the server would silently reduce.
+	OrderAzTrimDeg = FMath::Clamp(OrderAzTrimDeg + DeltaAzDeg, -15.0f, 15.0f);
+	OrderElTrimDeg = FMath::Clamp(OrderElTrimDeg + DeltaElDeg, -15.0f, 15.0f);
+}
+
+void USeaNetSubsystem::CommitFire()
+{
+	if (DesignatedTrackId == 0)
+	{
+		UE_LOG(LogSeaShield, Warning, TEXT("Fire order rejected: no track designated"));
+		return;
+	}
+	UE_LOG(LogSeaShield, Display,
+	       TEXT("Fire order: track %d salvo %d disp %.1f mrad trim (%.1f, %.1f) deg"),
+	       DesignatedTrackId, OrderSalvo, OrderDispersionMrad, OrderAzTrimDeg, OrderElTrimDeg);
+	FireAtTrack(DesignatedTrackId, OrderAzTrimDeg, OrderElTrimDeg, OrderSalvo, OrderDispersionMrad);
+}
+
 void USeaNetSubsystem::FireAtTrack(int32 TrackId, float AzimuthOffsetDeg, float ElevationOffsetDeg,
                                    int32 SalvoCount, float DispersionMrad)
 {
