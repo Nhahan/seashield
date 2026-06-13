@@ -204,7 +204,11 @@ void USeaFireControlPanel::NativeTick(const FGeometry& MyGeometry, float InDelta
 	{
 		Net = GameInstance->GetSubsystem<USeaNetSubsystem>();
 	}
-	const bool bShow = Net != nullptr && Net->IsWelcomed() && Net->GetRole() != ESeaRole::Observer;
+	// Only the seats that aim and fire run the fire-control console; the
+	// Commander directs from the PPI picture, the Observer has no HUD.
+	const ESeaRole Role = Net != nullptr ? Net->GetRole() : ESeaRole::Observer;
+	const bool bShow = Net != nullptr && Net->IsWelcomed() &&
+	                   (Role == ESeaRole::Weapons || Role == ESeaRole::Solo);
 	if (PanelHost != nullptr)
 	{
 		PanelHost->SetVisibility(bShow ? ESlateVisibility::HitTestInvisible
