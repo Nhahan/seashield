@@ -7,6 +7,8 @@
 import unreal
 
 LEVEL = "/Game/SeaShield/Maps/L_Range"
+# Must match SeaWorldFrame::Origin (Source/SeaShield/SeaWorldFrame.h).
+STAGE_ORIGIN = (300000.0, 300000.0, 0.0)
 
 
 def spawn(actor_subsystem, cls, label, location=(0.0, 0.0, 0.0), rotation=(0.0, 0.0, 0.0)):
@@ -42,12 +44,22 @@ def main():
     sun.get_component_by_class(unreal.DirectionalLightComponent).set_editor_property(
         "atmosphere_sun_light", True
     )
+    # Fully dynamic lighting (Lumen path): movable lights mean no baked data,
+    # so the runtime never shows the "LIGHTING NEEDS TO BE REBUILT" banner.
+    sun.root_component.set_editor_property("mobility", unreal.ComponentMobility.MOVABLE)
     spawn(actor_subsystem, unreal.SkyAtmosphere, "SkyAtmosphere")
-    spawn(actor_subsystem, unreal.SkyLight, "SkyLight").get_component_by_class(
-        unreal.SkyLightComponent
-    ).set_editor_property("real_time_capture", True)
+    sky_light = spawn(actor_subsystem, unreal.SkyLight, "SkyLight")
+    sky_light.root_component.set_editor_property("mobility", unreal.ComponentMobility.MOVABLE)
+    sky_light.get_component_by_class(unreal.SkyLightComponent).set_editor_property(
+        "real_time_capture", True
+    )
     spawn(actor_subsystem, unreal.ExponentialHeightFog, "HeightFog")
-    spawn(actor_subsystem, unreal.VolumetricCloud, "Clouds")
+    clouds = spawn(actor_subsystem, unreal.VolumetricCloud, "Clouds")
+    # Biggest GPU item by stat gpu (6.2 of 17.4 ms @1440p); 0.5 halves the
+    # view raymarch with no visible loss at the sim's camera distances.
+    clouds.get_components_by_class(unreal.VolumetricCloudComponent)[0].set_editor_property(
+        "view_sample_count_scale", 0.5
+    )
     # Open ocean sized for the engagement envelope (±20 km), with default
     # gerstner waves; the weather-driven wave/wind pass (K4) tunes this.
     # Zone sized to the close-action envelope; needs the matching
@@ -56,16 +68,18 @@ def main():
     # ground mesh under the ocean — the water info capture treats it as
     # terrain and snaps the zone's water surface down onto it (verified: the
     # surface hugged the seabed plane, jagged "shoreline" at the zone edge).
-    water_zone = spawn(actor_subsystem, unreal.WaterZone, "WaterZone")
-    water_zone.set_editor_property("zone_extent", unreal.Vector2D(819200.0, 819200.0))
+    # The play area lives at SeaWorldFrame::Origin = (3 km, 3 km): the Water
+    # plugin renders a corrupted ~512 m patch anchored at WORLD ZERO on Metal
+    # (probe-isolated: tracks neither camera, zone actor, spline nor meshes),
+    # so the stage keeps its distance. Zone centered on the play area.
+    water_zone = spawn(actor_subsystem, unreal.WaterZone, "WaterZone", location=STAGE_ORIGIN)
+    water_zone.set_editor_property("zone_extent", unreal.Vector2D(1024000.0, 1024000.0))
     ocean = spawn(actor_subsystem, unreal.WaterBodyOcean, "Ocean")
-    # The plugin's stock ocean waves asset — a bare new_object(
-    # GerstnerWaterWaves) has no spectrum and collapses the detailed-mesh
-    # surface to the floor (the "dry pit" we chased across several captures).
-    # The wiring goes through C++ (USeaLevelSetupLibrary): the asset-reference
-    # hop uses classes that are not exposed to scripting.
-    if not unreal.SeaLevelSetupLibrary.assign_ocean_waves(
-        ocean, "/Water/Waves/GerstnerWaves_Ocean"
+    # Seeded gerstner spectrum via C++ (the waves classes are not scriptable).
+    # 32 waves across a wide 3–80 m band kill the far-field repetition the
+    # stock asset shows; seed/wind become weather-driven in the K4 pass.
+    if not unreal.SeaLevelSetupLibrary.assign_generated_ocean_waves(
+        ocean, 7, 32, 700.0, 9000.0, 3.0, 32.0, 40.0, 90.0, 0.18, 0.12
     ):
         raise RuntimeError("failed to assign ocean waves")
     # The root cause of the long-chased "dead 512 m square": a scripted ocean
@@ -73,6 +87,13 @@ def main():
     # This is the editor's own "Fill Water Zone With Ocean" button.
     component = ocean.get_water_body_component()
     component.call_method("FillWaterZoneWithOcean")
+    # Far-distance skirt: a flat deep-sea ring extending 40 km past the
+    # gerstner zone so the horizon shows water, not a zone-boundary band.
+    water_mesh = water_zone.get_components_by_class(unreal.WaterMeshComponent)[0]
+    water_mesh.set_editor_property(
+        "far_distance_material", unreal.load_asset("/Game/SeaShield/Materials/M_FarOcean")
+    )
+    water_mesh.set_editor_property("far_distance_mesh_extent", 4000000.0)
     # The ocean spline outlines the ISLAND the ocean surrounds — its interior
     # plus the shape-dilation halo is punched dry (the long-chased pit at the
     # origin). Shrink both until the dry patch hides under the frigate hull.
@@ -92,30 +113,56 @@ def main():
             i, unreal.Vector(p.x * factor, p.y * factor, p.z), unreal.SplineCoordinateSpace.LOCAL, True
         )
     ocean.on_water_body_changed(shape_or_position_changed=True)
-    # Own-ship hull at the origin (the sim's launcher sits at ENU origin).
-    frigate = spawn(actor_subsystem, unreal.StaticMeshActor, "Frigate")
+    # The pit at the origin, finally identified (r.Water.WaterInfo.
+    # ShowSceneProxies=3 made it light up): the ocean's generated DILATED
+    # water-info mesh — the one flagged for the info-texture depth-only pass —
+    # leaks into the main depth pass on Metal and occludes the real surface.
+    # Hide just that one in game: its only job is ground-depth dilation for
+    # shoreline blending, and this map has no terrain. Hiding the non-dilated
+    # info mesh too would blank the info texture and kill the detailed tiles.
+    info_mesh_class = unreal.load_class(None, "/Script/Water.WaterBodyInfoMeshComponent")
+    for info_component in ocean.get_components_by_class(info_mesh_class):
+        if "Dilated" in info_component.get_name():
+            info_component.set_editor_property("hidden_in_game", True)
+    # Own-ship hull at the stage origin (the sim's ENU origin).
+    frigate = spawn(actor_subsystem, unreal.StaticMeshActor, "Frigate", location=STAGE_ORIGIN)
     frigate.static_mesh_component.set_editor_property(
         "static_mesh", unreal.load_asset("/Game/SeaShield/Meshes/SM_Frigate")
     )
 
-    if not level_subsystem.save_current_level():
+
+def _save():
+    if not unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).save_current_level():
         raise RuntimeError("failed to save level")
     unreal.log(f"SeaShieldLevel: {LEVEL} created and saved")
 
 
-def _deferred(_delta_seconds):
+_state = {"phase": "build", "seconds": 0.0, "handle": None}
+
+
+def _deferred(delta_seconds):
     # -ExecCmds fires during engine init, where new_level + spawns crash;
-    # defer one full editor tick so the world is stable.
-    unreal.unregister_slate_post_tick_callback(_HANDLE)
+    # defer one full editor tick so the world is stable. The save happens a
+    # settle period AFTER construction: the water-info meshes build
+    # asynchronously, and saving immediately serializes them half-baked.
+    _state["seconds"] += delta_seconds
     try:
-        main()
+        if _state["phase"] == "build":
+            _state["phase"] = "settle"
+            _state["seconds"] = 0.0
+            main()
+        elif _state["phase"] == "settle" and _state["seconds"] >= 30.0:
+            _state["phase"] = "done"
+            _save()
+            unreal.unregister_slate_post_tick_callback(_state["handle"])
+            unreal.SystemLibrary.quit_editor()
     except Exception:  # noqa: BLE001
         import traceback
 
         unreal.log_error(f"SeaShieldLevel: FAILED\n{traceback.format_exc()}")
-    finally:
+        unreal.unregister_slate_post_tick_callback(_state["handle"])
         unreal.SystemLibrary.quit_editor()
 
 
 if __name__ == "__main__":
-    _HANDLE = unreal.register_slate_post_tick_callback(_deferred)
+    _state["handle"] = unreal.register_slate_post_tick_callback(_deferred)

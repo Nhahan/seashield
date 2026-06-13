@@ -12,8 +12,9 @@ import unreal
 LEVEL = "/Game/SeaShield/Maps/L_Range"
 OUT_DIR = os.path.join(unreal.SystemLibrary.get_project_directory(), "Saved", "Screenshots", "MacEditor")
 OUT_NAME = "SeaShieldCapture.png"
-# Quarter view of the frigate at the origin: 175 m out, 40 m up.
-CAMERA_LOCATION = unreal.Vector(-15000.0, -9000.0, 4000.0)
+# Quarter view of the frigate at the stage origin (SeaWorldFrame::Origin =
+# 3 km NE of world zero — see SeaWorldFrame.h): 175 m out, 40 m up.
+CAMERA_LOCATION = unreal.Vector(285000.0, 291000.0, 4000.0)
 CAMERA_ROTATION = unreal.Rotator(0.0, -13.0, 31.0)  # roll, pitch, yaw
 WARMUP_SECONDS = 45.0  # shader compilation / streaming (water materials are heavy)
 ADAPT_CAPTURES = 30  # repeated captures let eye adaptation converge
