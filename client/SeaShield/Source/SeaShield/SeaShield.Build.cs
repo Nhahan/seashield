@@ -16,5 +16,8 @@ public class SeaShield : ModuleRules
 		// Water plugin API (ocean body / gerstner waves wiring in
 		// SeaLevelSetupLibrary — the asset-reference types are not scriptable).
 		PrivateDependencyModuleNames.Add("Water");
+
+		// Code-driven trail/splash ribbons (SeaWorldManager).
+		PrivateDependencyModuleNames.Add("ProceduralMeshComponent");
 	}
 }
