@@ -1,17 +1,27 @@
 #pragma once
 
 #include "Blueprint/UserWidget.h"
+#include "Components/Widget.h"
 #include "CoreMinimal.h"
 
 #include "SeaNetSubsystem.h"
 
 #include "SeaPpiWidget.generated.h"
 
+class SSeaPpiScope;
+
 // Radar PPI scope (charter §7 화면 ② — NTDS-style symbology), drawn entirely
-// in NativePaint as vector graphics: range rings, bearing ticks, the rotating
-// sweep, track symbols with their σ ring, and the designated track's PIP +
-// dispersion circle from the streamed fire solution. Everything on screen is
-// server data — the scope plots the ESTIMATE stream, never the truth (§5.5).
+// as vector graphics: range rings, bearing ticks, the rotating sweep, track
+// symbols with their σ ring, and the designated track's PIP + dispersion
+// circle from the streamed fire solution. Everything on screen is server
+// data — the scope plots the ESTIMATE stream, never the truth (§5.5).
+//
+// Structure: USeaPpiWidget owns the data (entity cache, sweep clock,
+// selection) and hosts an SSeaPpiScope leaf widget that does the painting.
+// The painting deliberately does NOT live in UUserWidget::NativePaint: on
+// UE 5.7 the SObjectWidget-routed paint never reached the screen (verified
+// against a stock UImage probe rendering fine in the same tree), while a
+// plain SLeafWidget in the tree paints reliably.
 UCLASS()
 class SEASHIELD_API USeaPpiWidget : public UUserWidget
 {
@@ -39,23 +49,38 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "SeaShield")
 	void SelectTrack(int32 TrackId) { SelectedTrackId = TrackId; }
 
-	// The nearest track symbol within GrabRadiusPx of a scope-local point —
-	// the click-to-designate path for the weapons console. 0 if none.
-	UFUNCTION(BlueprintCallable, Category = "SeaShield")
-	int32 TrackAtPosition(const FVector2D& LocalPoint, float GrabRadiusPx = 24.0f) const;
+	// Paint-side data access (SSeaPpiScope).
+	const TArray<FSeaEntityState>& Entities() const { return CachedEntities; }
+	float SweepAngle() const { return SweepAngleRad; }
 
 protected:
+	virtual TSharedRef<SWidget> RebuildWidget() override;
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
-	virtual int32 NativePaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry,
-	                          const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements,
-	                          int32 LayerId, const FWidgetStyle& InWidgetStyle,
-	                          bool bParentEnabled) const override;
 
 private:
-	// Sim ENU (meters, origin = own ship) -> scope-local pixels. North-up
-	// display: +north is up, +east is right.
-	FVector2D ToScope(const FGeometry& Geometry, double EastM, double NorthM) const;
-
 	float SweepAngleRad = 0.0f;
 	TArray<FSeaEntityState> CachedEntities;  // Refreshed in NativeTick.
+
+	// The scope leaf's host — gated on connection/role in NativeTick. The
+	// OUTER widget always stays visible so this tick keeps running (collapsed
+	// UserWidgets stop ticking and could never un-collapse themselves).
+	UPROPERTY()
+	TObjectPtr<class USeaPpiScopeHost> ScopeHost;
+};
+
+// UWidget shim that mounts the SSeaPpiScope leaf into the widget tree.
+UCLASS()
+class SEASHIELD_API USeaPpiScopeHost : public UWidget
+{
+	GENERATED_BODY()
+
+public:
+	TWeakObjectPtr<USeaPpiWidget> Owner;
+
+protected:
+	virtual TSharedRef<SWidget> RebuildWidget() override;
+	virtual void ReleaseSlateResources(bool bReleaseChildren) override;
+
+private:
+	TSharedPtr<SWidget> MyScope;
 };
