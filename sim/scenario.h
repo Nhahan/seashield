@@ -33,6 +33,16 @@ struct Scenario {
   // snapshot_delta, default on). Full snapshots remain the fallback for
   // silent/behind clients either way.
   bool snapshot_delta = true;
+  // Survival GAME mode (key game_mode, default off). When on, the server runs
+  // an endless sequence of single-target waves instead of one frozen
+  // engagement: each wave reseeds the world (key game_seed_stride applied to
+  // sim/gust/weather seeds), a target that reaches the ship costs a life, and
+  // the run ends when lives hit zero. The deterministic single-engagement path
+  // (replay, golden, every existing test) is completely unaffected — this is a
+  // strictly additive branch in the sim thread (charter §5.8 stays per-world).
+  bool game_mode = false;
+  int game_lives = 3;
+  std::uint64_t game_seed_stride = 2654435761ULL;  // Knuth multiplicative spread.
   WorldConfig config;
 };
 

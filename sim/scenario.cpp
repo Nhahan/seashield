@@ -141,6 +141,17 @@ std::optional<Scenario> load_scenario_text(const std::string& text, std::string*
   }
   scenario.snapshot_delta = snapshot_delta == 1;
 
+  const int game_mode = kv.get_int("game_mode", scenario.game_mode ? 1 : 0);
+  if (game_mode != 0 && game_mode != 1) {
+    return fail("game_mode must be 0 or 1");
+  }
+  scenario.game_mode = game_mode == 1;
+  scenario.game_lives = kv.get_int("game_lives", scenario.game_lives);
+  if (scenario.game_lives < 1) {
+    return fail("game_lives must be >= 1");
+  }
+  scenario.game_seed_stride = kv.get_u64("game_seed_stride", scenario.game_seed_stride);
+
   WorldConfig& cfg = scenario.config;
   cfg.sim_seed = kv.get_u64("sim_seed", 1);
   cfg.gust_seed = kv.get_u64("gust_seed", 1);
