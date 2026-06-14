@@ -73,6 +73,30 @@ void ASeaWorldManager::BeginPlay()
 			Net->OnEngagementEvent.AddDynamic(this, &ASeaWorldManager::HandleEngagementEvent);
 		}
 	}
+	// Locate the hand-placed frigate (setup_level.py) so the kOwnShip entity can
+	// drive its pose. Match the SM_Frigate mesh — robust against actor renaming
+	// and label stripping in packaged builds.
+	{
+		TArray<AActor*> MeshActors;
+		UGameplayStatics::GetAllActorsOfClass(this, AStaticMeshActor::StaticClass(), MeshActors);
+		for (AActor* Actor : MeshActors)
+		{
+			const AStaticMeshActor* SMA = Cast<AStaticMeshActor>(Actor);
+			const UStaticMeshComponent* Comp = SMA ? SMA->GetStaticMeshComponent() : nullptr;
+			const UStaticMesh* Mesh = Comp ? Comp->GetStaticMesh() : nullptr;
+			if (Mesh != nullptr && Mesh->GetName().Contains(TEXT("Frigate")))
+			{
+				FrigateActor = Actor;
+				break;
+			}
+		}
+		if (!FrigateActor.IsValid())
+		{
+			UE_LOG(LogSeaShieldWorld, Warning,
+			       TEXT("No SM_Frigate stage actor found; own-ship hull will not move (camera still follows)."));
+		}
+	}
+
 	// Pre-warm the engagement VFX pipeline once the player view exists.
 	FTimerHandle WarmupTimer;
 	GetWorld()->GetTimerManager().SetTimer(WarmupTimer, this, &ASeaWorldManager::WarmupVfx,
@@ -204,6 +228,26 @@ void ASeaWorldManager::Tick(float DeltaTime)
 	for (const FSeaEntityState& Entity : Entities)
 	{
 		const int32 Key = (static_cast<int32>(Entity.Kind) << 16) | Entity.Id;
+
+		// Own ship: drive the hand-placed frigate hull rather than spawning a
+		// generic actor. Yaw follows the course; the camera (gunner pawn) rides
+		// the same pose independently.
+		if (Entity.Kind == ESeaEntityKind::OwnShip)
+		{
+			if (FrigateActor.IsValid())
+			{
+				const FVector ShipStage = Entity.Position + SeaWorldFrame::Origin;
+				FRotator Yaw = FrigateActor->GetActorRotation();
+				if (!Entity.Velocity.IsNearlyZero(50.0))  // >0.5 m/s of way on
+				{
+					Yaw.Yaw = Entity.Velocity.Rotation().Yaw;
+				}
+				FrigateActor->SetActorLocationAndRotation(
+				    FVector(ShipStage.X, ShipStage.Y, FrigateActor->GetActorLocation().Z), Yaw);
+			}
+			continue;
+		}
+
 		Alive.Add(Key);
 
 		TWeakObjectPtr<AActor>& Slot = Spawned.FindOrAdd(Key);
@@ -237,6 +281,10 @@ void ASeaWorldManager::Tick(float DeltaTime)
 		{
 			SampleTrail(Key, StagePosition, Now);
 		}
+		else if (Entity.Kind == ESeaEntityKind::Target)
+		{
+			LastEntityVelCms.Add(Key, Entity.Velocity);  // for kill-wreckage inheritance
+		}
 	}
 
 	// Entities gone from the sample (resolved rockets, dropped tracks,
@@ -259,6 +307,7 @@ void ASeaWorldManager::Tick(float DeltaTime)
 
 	RebuildTrails(Now, Net->GetWeather().WindCms);
 	UpdateSplashes(Now);
+	UpdateWreckage(Now, DeltaTime);
 }
 
 void ASeaWorldManager::HandleEngagementEvent(const FSeaEngagementEvent& Event)
@@ -297,6 +346,15 @@ void ASeaWorldManager::HandleEngagementEvent(const FSeaEngagementEvent& Event)
 			}
 		}
 		Splashes.Reset();
+		for (FWreckage& W : Wreckage)
+		{
+			if (W.Mesh.IsValid())
+			{
+				W.Mesh->Destroy();
+			}
+		}
+		Wreckage.Reset();
+		LastEntityVelCms.Reset();
 		bLoggedFirstSpawn = false;
 		return;
 	}
@@ -306,14 +364,17 @@ void ASeaWorldManager::HandleEngagementEvent(const FSeaEngagementEvent& Event)
 		            GetWorld()->GetTimeSeconds(), /*bAirburst=*/true);
 		return;
 	}
-	if (Event.Kind == 2)  // kTargetDestroyed — a confirmed kill: burst on the target.
+	if (Event.Kind == 2)  // kTargetDestroyed — a confirmed kill: burst + wreckage.
 	{
 		const int32 Key = (static_cast<int32>(ESeaEntityKind::Target) << 16) | Event.SubjectId;
 		const TWeakObjectPtr<AActor>* Actor = Spawned.Find(Key);
 		if (Actor != nullptr && Actor->IsValid())
 		{
-			SpawnSplash(Actor->Get()->GetActorLocation(), GetWorld()->GetTimeSeconds(),
-			            /*bAirburst=*/true);
+			const FVector Where = Actor->Get()->GetActorLocation();
+			const double Now = GetWorld()->GetTimeSeconds();
+			SpawnSplash(Where, Now, /*bAirburst=*/true);
+			const FVector* Vel = LastEntityVelCms.Find(Key);
+			SpawnWreckage(Where, Vel != nullptr ? *Vel : FVector::ZeroVector, Now);
 		}
 		return;
 	}
@@ -619,5 +680,69 @@ void ASeaWorldManager::UpdateSplashes(double Now)
 			Where.Z = FMath::Max(Height, 0.05) * 100.0 / 2.0;
 			It->Column->SetActorLocation(Where);
 		}
+	}
+}
+
+void ASeaWorldManager::SpawnWreckage(const FVector& StagePosition, const FVector& InheritedVelCms,
+                                     double Now)
+{
+	if (TargetMesh == nullptr)
+	{
+		return;  // No hull mesh to throw; the airburst already sold the kill.
+	}
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AStaticMeshActor* Hull =
+	    GetWorld()->SpawnActor<AStaticMeshActor>(StagePosition, FRotator::ZeroRotator, Params);
+	if (Hull == nullptr)
+	{
+		return;
+	}
+	Hull->SetMobility(EComponentMobility::Movable);
+	Hull->GetStaticMeshComponent()->SetStaticMesh(TargetMesh);
+	Hull->GetStaticMeshComponent()->SetCastShadow(false);
+	Hull->SetActorScale3D(FVector(0.7));
+	FWreckage W;
+	W.Mesh = Hull;
+	// Keep half the inbound momentum, add an upward/lateral scatter so the hull
+	// tumbles up then arcs into the sea.
+	W.VelCms = InheritedVelCms * 0.5 +
+	           FVector(FMath::FRandRange(-1500.f, 1500.f), FMath::FRandRange(-1500.f, 1500.f),
+	                   FMath::FRandRange(600.f, 2600.f));
+	W.SpinDps = FVector(FMath::FRandRange(-220.f, 220.f), FMath::FRandRange(-220.f, 220.f),
+	                    FMath::FRandRange(-220.f, 220.f));
+	W.SpawnTime = Now;
+	Wreckage.Add(W);
+}
+
+void ASeaWorldManager::UpdateWreckage(double Now, float DeltaTime)
+{
+	constexpr float kWreckLifeS = 5.0f;
+	constexpr float kGravityCms2 = 980.0f;
+	const float SeaZ = static_cast<float>(SeaWorldFrame::Origin.Z);
+	for (auto It = Wreckage.CreateIterator(); It; ++It)
+	{
+		const double Age = Now - It->SpawnTime;
+		if (!It->Mesh.IsValid() || Age > kWreckLifeS)
+		{
+			if (It->Mesh.IsValid())
+			{
+				It->Mesh->Destroy();
+			}
+			It.RemoveCurrent();
+			continue;
+		}
+		It->VelCms.Z -= kGravityCms2 * DeltaTime;
+		FVector Pos = It->Mesh->GetActorLocation() + It->VelCms * DeltaTime;
+		if (Pos.Z < SeaZ)  // Hit the sea: kill momentum and let it sink under.
+		{
+			It->VelCms *= 0.2f;
+			It->VelCms.Z = -60.0f;
+			Pos.Z = FMath::Max(Pos.Z, SeaZ - 600.0f);
+		}
+		const FRotator Rot = It->Mesh->GetActorRotation() +
+		                     FRotator(It->SpinDps.Y * DeltaTime, It->SpinDps.Z * DeltaTime,
+		                              It->SpinDps.X * DeltaTime);
+		It->Mesh->SetActorLocationAndRotation(Pos, Rot);
 	}
 }

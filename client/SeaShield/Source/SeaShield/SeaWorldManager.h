@@ -81,11 +81,22 @@ private:
 		double SpawnTime = 0.0;
 		bool bAirburst = false;
 	};
+	// Falling debris spawned on a kill — the dead missile's hull tumbling into
+	// the sea, so a splash reads as a destroyed target, not just a puff.
+	struct FWreckage
+	{
+		TWeakObjectPtr<AActor> Mesh;
+		FVector VelCms = FVector::ZeroVector;   // cm/s, integrated under gravity
+		FVector SpinDps = FVector::ZeroVector;  // deg/s tumble
+		double SpawnTime = 0.0;
+	};
 
 	void SampleTrail(int32 Key, const FVector& StagePosition, double Now);
 	void RebuildTrails(double Now, const FVector& WindCms);
 	void SpawnSplash(const FVector& StagePosition, double Now, bool bAirburst);
 	void UpdateSplashes(double Now);
+	void SpawnWreckage(const FVector& StagePosition, const FVector& InheritedVelCms, double Now);
+	void UpdateWreckage(double Now, float DeltaTime);
 	// Draws every engagement material once as sub-pixel specks in front of
 	// the camera, so first-use shader/PSO compiles happen during boot instead
 	// of as a mid-salvo hitch (measured ~400 ms, client-design §8).
@@ -93,6 +104,12 @@ private:
 
 	bool bLoggedFirstSpawn = false;
 	bool bBurstCamFired = false;
+
+	// The hand-placed "Frigate" stage actor (setup_level.py). Located at
+	// BeginPlay and driven from the kOwnShip entity so the hull moves/turns with
+	// the player's helm. Weak: if the stage has no frigate we degrade gracefully.
+	TWeakObjectPtr<AActor> FrigateActor;
+	bool bLoggedNoFrigate = false;
 
 	// Frame statistics for the K6 budget table (logged at EndPlay).
 	int64 FrameCount = 0;
@@ -105,4 +122,9 @@ private:
 	TMap<int32, TWeakObjectPtr<AActor>> Spawned;
 	TMap<int32, FRocketTrail> Trails;
 	TArray<FSplash> Splashes;
+	TArray<FWreckage> Wreckage;
+	// Last seen stage position/velocity per entity — lets a kill spawn wreckage
+	// that inherits the target's motion even though the entity is already gone
+	// from the next snapshot.
+	TMap<int32, FVector> LastEntityVelCms;
 };

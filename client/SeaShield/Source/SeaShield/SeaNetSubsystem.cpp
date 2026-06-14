@@ -48,6 +48,7 @@ ESeaEntityKind from_protocol_kind(protocol::EntityKind kind)
 	{
 	case protocol::EntityKind::kRocket: return ESeaEntityKind::Rocket;
 	case protocol::EntityKind::kTrack: return ESeaEntityKind::Track;
+	case protocol::EntityKind::kOwnShip: return ESeaEntityKind::OwnShip;
 	default: break;
 	}
 	return ESeaEntityKind::Target;
@@ -218,12 +219,31 @@ void USeaNetSubsystem::Tick(float DeltaTime)
 			PendingShots.Reset();  // stale shots would compare against the new wave's target
 			LeadError = FSeaLeadError{};
 			break;
-		case protocol::EventKind::kTargetDestroyed:
-			++GameState.Kills;
+		case protocol::EventKind::kRocketResolved:
+			if (event.killed)
+			{
+				LastKillMissM = event.miss_distance_m;  // tightness of the killing pass
+			}
 			break;
+		case protocol::EventKind::kTargetDestroyed:
+		{
+			++GameState.Kills;
+			// Points: base × wave multiplier × accuracy × streak.
+			const float WaveMult = 1.0f + 0.1f * static_cast<float>(FMath::Max(0, GameState.Wave - 1));
+			const float AccBonus = LastKillMissM > 0.0f && LastKillMissM < 5.0f    ? 1.5f
+			                       : LastKillMissM > 0.0f && LastKillMissM < 11.0f ? 1.2f
+			                                                                       : 1.0f;
+			const float StreakMult = 1.0f + 0.05f * static_cast<float>(GameState.Streak);
+			GameState.Score += FMath::RoundToInt(100.0f * WaveMult * AccBonus * StreakMult);
+			++GameState.Streak;
+			GameState.BestStreak = FMath::Max(GameState.BestStreak, GameState.Streak);
+			LastKillMissM = 0.0f;
+			break;
+		}
 		case protocol::EventKind::kTargetHitShip:
 			++GameState.Leaks;
 			GameState.Lives = FMath::Max(0, GameState.MaxLives - GameState.Leaks);
+			GameState.Streak = 0;  // a leak breaks the streak
 			break;
 		case protocol::EventKind::kEngagementEnd:
 			GameState.bGameOver = true;
@@ -448,8 +468,20 @@ void USeaNetSubsystem::FireManual(float AzimuthDeg, float ElevationDeg, int32 Sa
 		const FVector WindEnu(WindCms.Y / 100.0, WindCms.X / 100.0, WindCms.Z / 100.0);
 		const FVector TPosEnu(E.Position.Y / 100.0, E.Position.X / 100.0, E.Position.Z / 100.0);
 		const FVector TVelEnu(E.Velocity.Y / 100.0, E.Velocity.X / 100.0, E.Velocity.Z / 100.0);
-		const SeaBallistics::FFireAid Aid =
-		    SeaBallistics::ComputeFireAid(AzimuthDeg, ElevationDeg, WindEnu, TPosEnu, TVelEnu);
+		// Launch from the own ship's pose, inheriting its velocity (matches the
+		// server's moving-platform trajectory). Zero when the ship is at rest.
+		FVector ShipPosEnu = FVector::ZeroVector;
+		FVector ShipVelEnu = FVector::ZeroVector;
+		FSeaEntityState ShipState;
+		if (GetOwnShip(ShipState))
+		{
+			ShipPosEnu = FVector(ShipState.Position.Y / 100.0, ShipState.Position.X / 100.0,
+			                     ShipState.Position.Z / 100.0);
+			ShipVelEnu = FVector(ShipState.Velocity.Y / 100.0, ShipState.Velocity.X / 100.0,
+			                     ShipState.Velocity.Z / 100.0);
+		}
+		const SeaBallistics::FFireAid Aid = SeaBallistics::ComputeFireAid(
+		    AzimuthDeg, ElevationDeg, WindEnu, TPosEnu, TVelEnu, ShipPosEnu, ShipVelEnu);
 		if (Aid.bValid && Aid.TimeOfFlightS > 0.1f)
 		{
 			FPendingShot Shot;
@@ -461,4 +493,31 @@ void USeaNetSubsystem::FireManual(float AzimuthDeg, float ElevationDeg, int32 Sa
 		}
 		break;
 	}
+}
+
+void USeaNetSubsystem::SteerShip(float Rudder, float Throttle)
+{
+	if (Runnable == nullptr)
+	{
+		return;
+	}
+	protocol::ShipCommand steer;
+	steer.rudder = FMath::Clamp(Rudder, -1.0f, 1.0f);
+	steer.throttle = FMath::Clamp(Throttle, 0.0f, 1.0f);
+	Runnable->Session.request_steer(steer);
+}
+
+bool USeaNetSubsystem::GetOwnShip(FSeaEntityState& OutShip) const
+{
+	TArray<FSeaEntityState> Entities;
+	SampleEntities(Entities);
+	for (const FSeaEntityState& E : Entities)
+	{
+		if (E.Kind == ESeaEntityKind::OwnShip)
+		{
+			OutShip = E;
+			return true;
+		}
+	}
+	return false;
 }

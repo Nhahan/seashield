@@ -15,7 +15,7 @@ class FRunnableThread;
 // protocol's — conversion goes through explicit switches in the .cpp, so a
 // protocol renumbering fails loudly at compile time instead of silently.
 UENUM(BlueprintType)
-enum class ESeaEntityKind : uint8 { Target, Rocket, Track };
+enum class ESeaEntityKind : uint8 { Target, Rocket, Track, OwnShip };
 
 UENUM(BlueprintType)
 enum class ESeaRole : uint8 { Observer, Commander, Weapons, Solo };
@@ -89,6 +89,11 @@ struct FSeaGameState
 	UPROPERTY(BlueprintReadOnly, Category = "SeaShield") int32 Lives = 3;
 	UPROPERTY(BlueprintReadOnly, Category = "SeaShield") int32 MaxLives = 3;
 	UPROPERTY(BlueprintReadOnly, Category = "SeaShield") bool bGameOver = false;
+	// Points: each kill scores base × wave-multiplier × accuracy × streak. Streak
+	// is consecutive kills without a leak; it multiplies and resets on a leak.
+	UPROPERTY(BlueprintReadOnly, Category = "SeaShield") int32 Score = 0;
+	UPROPERTY(BlueprintReadOnly, Category = "SeaShield") int32 Streak = 0;
+	UPROPERTY(BlueprintReadOnly, Category = "SeaShield") int32 BestStreak = 0;
 };
 
 // Owns the network thread (FSeaNetRunnable wrapping the headlessly-tested
@@ -132,6 +137,15 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "SeaShield")
 	void FireManual(float AzimuthDeg, float ElevationDeg, int32 SalvoCount, float DispersionMrad);
+
+	// Own-ship helm: rudder [-1,1] (+ = starboard), throttle [0,1]. Held
+	// set-points; send on change. No-op without a live session.
+	UFUNCTION(BlueprintCallable, Category = "SeaShield")
+	void SteerShip(float Rudder, float Throttle);
+
+	// Latest own-ship pose (kOwnShip entity). False until one has arrived.
+	UFUNCTION(BlueprintPure, Category = "SeaShield")
+	bool GetOwnShip(FSeaEntityState& OutShip) const;
 
 	// --- Weapons command state (operator fire order) ---
 	// Designation is the single source of truth here: the PPI writes it on
@@ -213,6 +227,7 @@ private:
 	float OrderAzTrimDeg = 0.0f;     // operator trim, server clamps to +-15
 	float OrderElTrimDeg = 0.0f;
 	FSeaGameState GameState;
+	float LastKillMissM = 0.0f;  // miss of the most recent killing rocket (scoring)
 
 	// Lead-error tracking (client-only). A shot pushes its predicted intercept;
 	// after one time-of-flight the actual threat position is compared.
