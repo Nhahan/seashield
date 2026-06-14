@@ -151,10 +151,10 @@ TEST_F(ProtocolIntegrationTest, SnapshotsFlowToEveryRole) {
     EXPECT_FALSE(report.disconnected_early);
     // 1.5s at 30Hz is ~45 distinct ticks; demand a conservative majority.
     EXPECT_GE(report.snapshot_ticks, 20u);
-    // Target plus at most one track of it (the tracker may or may not have
-    // initiated within 1.5 s at the default 2 s scan period).
-    EXPECT_GE(report.last_total_entities, 1u);
-    EXPECT_LE(report.last_total_entities, 2u);
+    // Own ship (always, v5) + target, plus at most one track of it (the tracker
+    // may or may not have initiated within 1.5 s at the default 2 s scan period).
+    EXPECT_GE(report.last_total_entities, 2u);
+    EXPECT_LE(report.last_total_entities, 3u);
     EXPECT_FALSE(report.weather_summary.empty());
     EXPECT_EQ(report.last_phase, protocol::EngagementPhase::kRunning);
   }

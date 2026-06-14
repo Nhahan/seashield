@@ -138,6 +138,88 @@ TEST(DeterminismTest, ReplayFromJournalMatchesOriginalRun) {
       << "canonical run produced no track activity — the assertion above is vacuous";
 }
 
+// A steerable own ship (the survival game's maneuvering platform). The
+// single-engagement default is a fixed platform; this exercises the steering
+// path that the journal must capture.
+WorldConfig steerable_config() {
+  WorldConfig cfg = canonical_config();
+  cfg.ship.max_speed_mps = 16.0;
+  cfg.ship.accel_mps2 = 1.5;
+  cfg.ship.turn_rate_max_rad_s = math::deg_to_rad(8.0);
+  return cfg;
+}
+
+TEST(DeterminismTest, SteerJournalRoundTripsBitExactly) {
+  Journal journal;
+  journal.record(30, canonical_fire());  // Mixed fire + steer entries.
+  SteerCommand s;
+  s.rudder = -0.731234567890123;  // Deliberately non-round doubles.
+  s.throttle = 0.654321098765432;
+  journal.record_steer(45, s);
+  s.rudder = 1.0;
+  s.throttle = 0.0;
+  journal.record_steer(120, s);
+
+  const auto parsed = Journal::parse(journal.serialize());
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_EQ(parsed->entries().size(), 3u);
+  EXPECT_EQ(parsed->entries()[0].kind, JournalEntry::Kind::kFire);
+  EXPECT_EQ(parsed->entries()[1].kind, JournalEntry::Kind::kSteer);
+  EXPECT_EQ(parsed->entries()[1].tick, 45u);
+  EXPECT_DOUBLE_EQ(parsed->entries()[1].steer.rudder, -0.731234567890123);
+  EXPECT_DOUBLE_EQ(parsed->entries()[1].steer.throttle, 0.654321098765432);
+  EXPECT_EQ(parsed->entries()[2].kind, JournalEntry::Kind::kSteer);
+  EXPECT_DOUBLE_EQ(parsed->entries()[2].steer.rudder, 1.0);
+  EXPECT_DOUBLE_EQ(parsed->entries()[2].steer.throttle, 0.0);
+}
+
+TEST(DeterminismTest, ReplayWithSteeringMatchesOriginalRun) {
+  Journal journal;
+  World original(steerable_config());
+  const auto drive = [&](std::uint64_t t) {
+    if (t == 30 || t == 240) {
+      journal.record(t, canonical_fire());
+      original.queue_fire(canonical_fire());
+    }
+    if (t == 10) {
+      const SteerCommand s{1.0, 1.0};  // Hard-over, flank.
+      journal.record_steer(t, s);
+      original.queue_steer(s);
+    }
+    if (t == 200) {
+      const SteerCommand s{-0.5, 0.8};  // Ease off the other way.
+      journal.record_steer(t, s);
+      original.queue_steer(s);
+    }
+  };
+  for (std::uint64_t t = 0; t < 600; ++t) {
+    drive(t);
+    original.step();
+  }
+  // The steering actually moved the ship — otherwise the replay check is vacuous.
+  EXPECT_GT(original.ship_position().norm(), 50.0);
+
+  const auto parsed = Journal::parse(journal.serialize());
+  ASSERT_TRUE(parsed.has_value());
+  World replay(steerable_config());
+  std::size_t next_entry = 0;
+  for (std::uint64_t t = 0; t < 600; ++t) {
+    while (next_entry < parsed->entries().size() && parsed->entries()[next_entry].tick == t) {
+      const JournalEntry& e = parsed->entries()[next_entry];
+      if (e.kind == JournalEntry::Kind::kSteer) {
+        replay.queue_steer(e.steer);
+      } else {
+        replay.queue_fire(e.command);
+      }
+      ++next_entry;
+    }
+    replay.step();
+  }
+  EXPECT_EQ(original.state_hash(), replay.state_hash());
+  EXPECT_DOUBLE_EQ(original.ship_position().x, replay.ship_position().x);
+  EXPECT_DOUBLE_EQ(original.ship_position().y, replay.ship_position().y);
+}
+
 std::string golden_path() {
 #if defined(__APPLE__)
   const char* os = "darwin";

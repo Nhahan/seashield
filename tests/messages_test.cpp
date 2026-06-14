@@ -210,6 +210,40 @@ TEST(MessagesTest, FireRequestRoundTripsDoublesBitExactly) {
   EXPECT_EQ(m->launch_interval_s, 0.05);
 }
 
+TEST(MessagesTest, ShipCommandRoundTripsDoublesBitExactly) {
+  ShipCommand steer;
+  steer.rudder = -0.731234567890123;
+  steer.throttle = 0.654321098765432;
+
+  const auto decoded = control_round_trip(steer);
+  ASSERT_TRUE(decoded.has_value());
+  const auto* m = std::get_if<ShipCommand>(&*decoded);
+  ASSERT_NE(m, nullptr);
+  EXPECT_EQ(m->rudder, -0.731234567890123);
+  EXPECT_EQ(m->throttle, 0.654321098765432);
+}
+
+TEST(MessagesTest, OwnShipEntityRoundTrips) {
+  EntityRecord ship;
+  ship.id = 0;
+  ship.kind = EntityKind::kOwnShip;
+  ship.pos_x = 1234.5;
+  ship.pos_y = -678.25;
+  ship.pos_z = 0.0;
+  ship.vel_x = 12.5;
+  ship.vel_y = -3.5;
+  Writer w;
+  ship.encode(w);
+  Reader r(w.data());
+  const auto decoded = EntityRecord::decode(r);
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(decoded->kind, EntityKind::kOwnShip);
+  EXPECT_NEAR(decoded->pos_x, 1234.5, 0.01);
+  EXPECT_NEAR(decoded->pos_y, -678.25, 0.01);
+  EXPECT_NEAR(decoded->vel_x, 12.5, 0.1);
+  EXPECT_NEAR(decoded->vel_y, -3.5, 0.1);
+}
+
 TEST(MessagesTest, UdpHelloAndEmptyMessagesRoundTrip) {
   const auto hello = data_round_trip(UdpHello{123456789});
   ASSERT_TRUE(hello.has_value());
@@ -417,9 +451,20 @@ TEST(MessagesTest, V2GuardsAcceptNewEnumsAndRejectTheNextOnes) {
   Reader r(w.data());
   EXPECT_TRUE(EntityRecord::decode(r).has_value());
 
+  // kOwnShip (3) is valid as of v5 — it fills the last 2-bit kind slot.
+  Writer wship;
+  wship.u16(1);
+  wship.u8(static_cast<std::uint8_t>(EntityKind::kOwnShip));
+  wship.u8(0);
+  wship.u8(0);
+  for (int i = 0; i < 3; ++i) wship.i24(0);
+  for (int i = 0; i < 3; ++i) wship.i16(0);
+  Reader rship(wship.data());
+  EXPECT_TRUE(EntityRecord::decode(rship).has_value());
+
   Writer w2;
   w2.u16(1);
-  w2.u8(3);  // One past kTrack.
+  w2.u8(4);  // One past kOwnShip.
   w2.u8(0);
   w2.u8(0);
   for (int i = 0; i < 3; ++i) w2.i24(0);

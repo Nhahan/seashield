@@ -6,6 +6,8 @@
 #include <mutex>
 #include <thread>
 
+#include <cmath>
+
 #include "client/core/interp_buffer.h"
 #include "core/math.h"
 #include "net/socket_util.h"
@@ -143,6 +145,107 @@ TEST(ClientSessionTest, ProductionPipelineConsumesALiveEngagement) {
     const auto sampled = interp.sample(*render_tick);
     EXPECT_FALSE(sampled.empty());
   }
+
+  session.stop();
+  net_thread.join();
+  server.stop();
+}
+
+// P7+ end-to-end: a ShipCommand from the production client engine reaches the
+// sim and the resulting own-ship motion comes back as a moving kOwnShip entity —
+// the whole helm wire path (request_steer -> handle_steer -> SPSC -> sim ->
+// snapshot) exercised against the real server.
+TEST(ClientSessionTest, OwnShipSteeringMovesTheShipEntityOverTheWire) {
+  net::ignore_sigpipe();
+  std::string error;
+  auto scenario = sim::load_scenario_text(kScenarioText, &error);
+  ASSERT_TRUE(scenario.has_value()) << error;
+  // A steerable own ship; the single-engagement path still emits the kOwnShip
+  // entity, so no game-mode is needed to verify the helm.
+  scenario->config.ship.max_speed_mps = 30.0;
+  scenario->config.ship.accel_mps2 = 10.0;
+  scenario->config.ship.turn_rate_max_rad_s = math::deg_to_rad(8.0);
+
+  server::SimServerConfig server_config;
+  server_config.tcp_port = 0;
+  server_config.udp_port = 0;
+  server_config.scenario = *scenario;
+  server::SimServer server(server_config);
+  ASSERT_TRUE(server.start());
+
+  std::mutex mutex;
+  bool welcomed = false;
+  bool saw_ownship = false;
+  bool have_start = false;
+  double ship_start_x = 0.0, ship_start_y = 0.0;
+  double ship_last_x = 0.0, ship_last_y = 0.0;
+  std::string session_error;
+
+  client::ClientSessionConfig config;
+  config.tcp_port = server.tcp_port();
+  config.role = protocol::Role::kSolo;
+  client::ClientSessionCallbacks callbacks;
+  callbacks.on_welcome = [&](const protocol::ServerWelcome&) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    welcomed = true;
+  };
+  callbacks.on_snapshot = [&](const protocol::Snapshot& batch) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    for (const protocol::EntityRecord& e : batch.entities) {
+      if (e.kind != protocol::EntityKind::kOwnShip) {
+        continue;
+      }
+      saw_ownship = true;
+      ship_last_x = e.pos_x;
+      ship_last_y = e.pos_y;
+      if (!have_start) {
+        have_start = true;
+        ship_start_x = e.pos_x;
+        ship_start_y = e.pos_y;
+      }
+    }
+  };
+  callbacks.on_error = [&](const std::string& what) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    session_error = what;
+  };
+
+  client::ClientSession session(config, callbacks);
+  std::thread net_thread([&] { session.run(); });
+
+  // Wait for welcome + the own-ship entity to appear, sitting at the origin
+  // (a fixed platform until commanded).
+  auto deadline = std::chrono::steady_clock::now() + 10s;
+  bool ready = false;
+  while (!ready && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(50ms);
+    const std::lock_guard<std::mutex> lock(mutex);
+    ready = welcomed && saw_ownship;
+  }
+  {
+    const std::lock_guard<std::mutex> lock(mutex);
+    ASSERT_TRUE(session_error.empty()) << session_error;
+    ASSERT_TRUE(ready) << "welcomed=" << welcomed << " saw_ownship=" << saw_ownship;
+    EXPECT_NEAR(ship_start_x, 0.0, 1.0);
+    EXPECT_NEAR(ship_start_y, 0.0, 1.0);
+  }
+
+  // Ahead full: the kOwnShip entity must make way off the origin.
+  protocol::ShipCommand steer;
+  steer.rudder = 0.0;
+  steer.throttle = 1.0;
+  session.request_steer(steer);
+
+  double moved = 0.0;
+  auto move_deadline = std::chrono::steady_clock::now() + 6s;
+  while (moved < 20.0 && std::chrono::steady_clock::now() < move_deadline) {
+    std::this_thread::sleep_for(50ms);
+    const std::lock_guard<std::mutex> lock(mutex);
+    const double dx = ship_last_x - ship_start_x;
+    const double dy = ship_last_y - ship_start_y;
+    moved = std::sqrt(dx * dx + dy * dy);
+  }
+  EXPECT_GT(moved, 20.0) << "own ship did not make way under throttle";
 
   session.stop();
   net_thread.join();
