@@ -75,6 +75,29 @@ HUD가 비어 보인다 — 버그가 아니라 게이팅 동작).
 | `-SeaTestBurst` | 합성 기폭+물기둥 1회 (비주얼 QA를 교전 운에서 분리) | SeaWorldManager |
 | `-SeaQuit=초` | **스크린샷 없이** 종료 — 계측 전용 (§5) | GameMode |
 | `-SeaStat=gpu\|unit\|...` | stat 표시 토글 (`-ExecCmds="stat ..."`는 -game에서 무효) | GameMode |
+| `-SeaGamePlay` | 생존 게임 자동 사수: 탄착예측기로 요격해를 풀어 추적·사격(웨이브 진행). 마우스 없이 게임 루프를 캡처 검증 | PlayerController |
+| `-SeaManualPlay` | **사람 입력 경로** 검증용 자동 사수: 실제 마우스룩(Turn/LookUp)·Fire() 핸들러를 구동하고 화면 SOLUTION(탄착=리드)에서만 발사 — "HUD만으로 사람이 맞출 수 있는가" 검증 | PlayerController |
+| `-SeaShotSeq=초` | 지정 간격마다 함교 시점 스크린샷(게임 루프 필름스트립), `-SeaShotSeqQuit=초`(기본 42)에 종료 | GameMode |
+
+### 3b. 생존 게임 모드 (플레이어블)
+
+`scenarios/game.scn`(`game_mode = 1`)은 무유도 로켓으로 끝없이 침투하는 ASM 웨이브를
+요격하는 **플레이 가능한 생존 게임**이다. 서버는 단일교전 결정론 경로(리플레이·골든·
+전체 테스트)를 그대로 두고, 게임 모드에서만 `game_thread_main`이 웨이브마다 World를
+재시드 생성한다(방위/거리/고도/속도·날씨가 매번 다름, 난이도는 웨이브로 램프). 표적이
+함선 근방(`kShipHitRangeM` 250 m)에 도달하면 생명 1 감소, 0이면 게임 종료(AAR).
+와이어는 라운드 무관 monotonic tick + 풀 스냅샷(델타 off)로 라운드 경계를 안전화.
+
+직접 플레이(마우스 조준): **`client/SeaShield/Tools/play_game.sh`** — 서버를 띄우고
+함교 콘솔(마우스 선회, F/Space/LMB 사격, `[`/`]` 살보, `;`/`'` 산포)을 연다. HUD:
+조준선·탄착 pipper(앰버)·리드 고스트(시안, 겹치면 SOLUTION 녹색)·위협 readout(거리/접근
+속도/TTI)·화면밖 위협 화살표·웨이브/SPLASHED/생명·웨이브 배너.
+
+캡처 검증(마우스 없이): 서버를 **세션 분리**(`python3 -c 'import os;os.setsid()...'`)로
+띄우고 에디터를 `-SeaGamePlay -SeaShotSeq=2.5`로 실행, **에디터 생존은 PID가 아니라
+명령줄(`pgrep -f SeaServer=...`)로 감시**한다(런처 PID 조기 종료 함정). 서버는 에디터가
+끝난 뒤에만 포트 매칭으로 정리 — broad `pkill`은 동시 실행 중인 다른 캡처의 서버까지
+죽이므로 캡처 도중 절대 쓰지 말 것.
 
 스크린샷은 `client/SeaShield/Saved/Screenshots/MacEditor/SeaShot.png` — 프로세스
 종료 후 2~4 s 늦게 기록되므로(쓰기 레이스) 항상 sleep 후 읽고, 런 전에 이전 파일을
