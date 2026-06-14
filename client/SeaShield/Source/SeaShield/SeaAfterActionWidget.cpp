@@ -191,9 +191,16 @@ void USeaAfterActionWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 		WindBearing += 360.0;
 	}
 
+	const FSeaGameState GS = Net->GetGameState();
 	CachedLines.Reset();
 	CachedLines.Add(TEXT("AFTER-ACTION REVIEW"));
 	CachedLines.Add(bEngagementEnded ? TEXT("ENGAGEMENT COMPLETE") : TEXT("ENGAGEMENT IN PROGRESS"));
+	if (GS.Wave > 0)  // Survival game run: headline the score.
+	{
+		CachedLines.Add(FString::Printf(TEXT("FINAL SCORE       %d"), GS.Score));
+		CachedLines.Add(FString::Printf(TEXT("WAVE REACHED      %d   BEST STREAK x%d"), GS.Wave,
+		                                GS.BestStreak));
+	}
 	CachedLines.Add(FString::Printf(TEXT("ROCKETS FIRED     %d"), Launches));
 	CachedLines.Add(FString::Printf(TEXT("RESOLVED          %d   (BURST %d / SPLASH %d)"), Resolved,
 	                                Bursts, Splashes));

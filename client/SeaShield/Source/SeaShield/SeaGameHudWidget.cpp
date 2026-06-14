@@ -75,12 +75,19 @@ public:
 		    Out, Layer,
 		    Geometry.ToPaintGeometry(FVector2f(270, 116), FSlateLayoutTransform(FVector2f(24, 22))),
 		    &Box, ESlateDrawEffect::None, FLinearColor(0.01f, 0.02f, 0.012f, 0.55f));
-		Text(FString::Printf(TEXT("WAVE %d"), S.Wave), Big, 36, 28, Ink, 220.0f);
-		Text(FString::Printf(TEXT("SPLASHED  %d"), S.Kills), Mid, 38, 70, Dim, 220.0f);
-		// Nearest miss this wave — makes "unguided is hard" a measured number.
+		Text(FString::Printf(TEXT("WAVE %d"), S.Wave), Big, 36, 26, Ink, 220.0f);
+		Text(FString::Printf(TEXT("SCORE  %d"), S.Score), Mid, 38, 64,
+		     FLinearColor(1.0f, 0.92f, 0.5f, 0.95f), 220.0f);
+		// Splash count + a streak chip when a no-leak run is building.
+		FString Tally = FString::Printf(TEXT("SPLASHED  %d"), S.Kills);
+		if (S.Streak >= 2)
+		{
+			Tally += FString::Printf(TEXT("   x%d STREAK"), S.Streak);
+		}
+		Text(Tally, Mid, 38, 88, Dim, 260.0f);
 		if (S.BestMissM > 0.0f)
 		{
-			Text(FString::Printf(TEXT("NEAREST MISS  %.0f m"), S.BestMissM), Mid, 38, 96,
+			Text(FString::Printf(TEXT("NEAREST MISS  %.0f m"), S.BestMissM), Mid, 38, 110,
 			     FLinearColor(1.0f, 0.7f, 0.3f, 0.9f), 260.0f);
 		}
 
@@ -241,6 +248,8 @@ void USeaGameHudWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTim
 	Cached.Kills = GS.Kills;
 	Cached.Lives = GS.Lives;
 	Cached.MaxLives = GS.MaxLives;
+	Cached.Score = GS.Score;
+	Cached.Streak = GS.Streak;
 	Cached.bGameOver = GS.bGameOver;
 
 	if (!bInitialized)

@@ -27,6 +27,8 @@ public:
 		int32 Kills = 0;
 		int32 Lives = 3;
 		int32 MaxLives = 3;
+		int32 Score = 0;
+		int32 Streak = 0;
 		bool bGameOver = false;
 		FString Banner;       // transient center text ("" = none)
 		float BannerAlpha = 0.0f;
