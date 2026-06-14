@@ -150,6 +150,11 @@ std::optional<Scenario> load_scenario_text(const std::string& text, std::string*
   if (scenario.game_lives < 1) {
     return fail("game_lives must be >= 1");
   }
+  const int enemy_attack = kv.get_int("game_enemy_attack", scenario.game_enemy_attack ? 1 : 0);
+  if (enemy_attack != 0 && enemy_attack != 1) {
+    return fail("game_enemy_attack must be 0 or 1");
+  }
+  scenario.game_enemy_attack = enemy_attack == 1;
   scenario.game_seed_stride = kv.get_u64("game_seed_stride", scenario.game_seed_stride);
 
   WorldConfig& cfg = scenario.config;

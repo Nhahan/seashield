@@ -42,6 +42,12 @@ struct Scenario {
   // strictly additive branch in the sim thread (charter §5.8 stays per-world).
   bool game_mode = false;
   int game_lives = 3;
+  // Enemy attack toggle (key game_enemy_attack, default on). When off, a target
+  // that reaches the ship is resolved (the wave still progresses) but costs no
+  // life and raises no kTargetHitShip — the ship is invulnerable, so the run is
+  // endless. Used to develop/iterate the rest of the loop before the ship-damage
+  // model is built out.
+  bool game_enemy_attack = true;
   std::uint64_t game_seed_stride = 2654435761ULL;  // Knuth multiplicative spread.
   WorldConfig config;
 };
