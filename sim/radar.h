@@ -57,8 +57,11 @@ class Radar {
   // where replay bugs breed. Targets must be passed in a fixed order (the
   // caller's determinism contract). Appends plots for this tick to out_plots
   // and to the current-scan buffer.
+  // platform_position is the own ship's surface position; the antenna rides it
+  // (mast height added on z). The default origin reproduces the legacy
+  // fixed-mast geometry bit-for-bit.
   void step(std::uint64_t tick, std::span<const math::Vec3> target_positions,
-            std::vector<Plot>& out_plots);
+            std::vector<Plot>& out_plots, const math::Vec3& platform_position = math::Vec3{});
 
   std::uint32_t scan_index(std::uint64_t tick) const {
     return static_cast<std::uint32_t>(tick / scan_ticks_);

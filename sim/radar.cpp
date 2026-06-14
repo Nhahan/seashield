@@ -14,9 +14,10 @@ constexpr double kEffectiveEarthFactor = 4.0 / 3.0;
 constexpr double kInvLn10 = 0.43429448190325182765;  // log10(x) = ln(x)·this.
 
 // Distinct from kLaunchPosition on purpose: the antenna sits on the mast, the
-// launcher on the deck. Mixing them up biases every elevation measurement.
-math::Vec3 antenna_position(const RadarParams& params) {
-  return {0.0, 0.0, params.antenna_height_m};
+// launcher on the deck. Mixing them up biases every elevation measurement. The
+// antenna rides the own ship's surface position; the mast height adds on z.
+math::Vec3 antenna_position(const RadarParams& params, const math::Vec3& platform) {
+  return {platform.x, platform.y, platform.z + params.antenna_height_m};
 }
 
 double wrap_two_pi(double angle_rad) {
@@ -58,7 +59,8 @@ double Radar::detection_probability(double range_m, double target_alt_m) const {
 }
 
 void Radar::step(std::uint64_t tick, std::span<const math::Vec3> target_positions,
-                 std::vector<Plot>& out_plots) {
+                 std::vector<Plot>& out_plots, const math::Vec3& platform_position) {
+  const math::Vec3 antenna = antenna_position(params_, platform_position);
   const std::uint64_t beam_phase = tick % scan_ticks_;
   const std::uint32_t scan = scan_index(tick);
   if (!last_scan_plots_.empty() && last_scan_plots_.front().scan_index != scan) {
@@ -66,7 +68,7 @@ void Radar::step(std::uint64_t tick, std::span<const math::Vec3> target_position
   }
 
   for (const math::Vec3& truth : target_positions) {
-    const math::Vec3 rel = truth - antenna_position(params_);
+    const math::Vec3 rel = truth - antenna;
     const double ground_range = math::sqrt(rel.x * rel.x + rel.y * rel.y);
     const double true_azimuth = wrap_two_pi(math::atan2(rel.x, rel.y));  // CW from North.
 
@@ -106,8 +108,7 @@ void Radar::step(std::uint64_t tick, std::span<const math::Vec3> target_position
     plot.azimuth_rad = noisy_azimuth;
     plot.elevation_rad = noisy_elevation;
     plot.position =
-        antenna_position(params_) +
-        math::direction_from_az_el(noisy_azimuth, noisy_elevation) * noisy_range;
+        antenna + math::direction_from_az_el(noisy_azimuth, noisy_elevation) * noisy_range;
 
     // Converted-measurement covariance: R = J·diag(σ_r², σ_az², σ_el²)·Jᵀ
     // with the Jacobian of (r, az, el) → ENU evaluated AT the measurement.

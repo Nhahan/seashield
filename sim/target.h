@@ -29,6 +29,12 @@ struct TargetParams {
   double weave_range_m = 0.0;
   double weave_turn_rate_rad_s = math::deg_to_rad(15.0);  // Oscillation amplitude.
   double weave_period_s = 4.0;
+
+  // Terminal-phase heading slew limit (rad/s). 0 = UNLIMITED: the heading snaps
+  // straight at the ship every tick — the legacy instant homing, bit-for-bit.
+  // A finite cap models a real ASM's turn limit, so a hard own-ship maneuver
+  // can force the missile to overshoot — the dodge mechanic (charter §5.3).
+  double terminal_turn_rate_max_rad_s = 0.0;
 };
 
 class Target {
@@ -45,7 +51,10 @@ class Target {
         speed_(params.speed_mps),
         turn_rate_(params.turn_rate_rad_s) {}
 
-  void step(double dt_s);
+  // ship_pos is the own ship's current position; the pop-up/weave/terminal
+  // triggers and the terminal homing aim are all measured relative to it. A
+  // fixed platform at the origin reproduces the legacy behaviour bit-for-bit.
+  void step(double dt_s, const math::Vec3& ship_pos = math::Vec3{});
 
   const math::Vec3& position() const { return position_; }
   // Full velocity including the vertical component in pop-up/terminal phases
@@ -62,14 +71,22 @@ class Target {
   void destroy() { destroyed_ = true; }
 
  private:
+  // Ground range to the own ship (the aim point). Defaults to the origin until
+  // step() latches the ship's pose, so a default-constructed target measures
+  // range to the origin exactly as before.
   double ground_range_m() const {
-    return math::sqrt(position_.x * position_.x + position_.y * position_.y);
+    const double dx = position_.x - ship_ref_.x;
+    const double dy = position_.y - ship_ref_.y;
+    return math::sqrt(dx * dx + dy * dy);
   }
   // Flight path angle γ by phase: 0 / +climb / dive at the ship's deck.
   double flight_path_angle_rad() const;
 
   TargetParams params_;
   math::Vec3 position_;
+  // The own ship's position this tick — the homing/trigger reference. Latched
+  // at the top of step(); origin by default (legacy fixed platform).
+  math::Vec3 ship_ref_{0.0, 0.0, 0.0};
   // Kinematic state mirrors the params so a default-constructed Target stays
   // inert (speed 0) — the pre-P4 semantics tests rely on.
   double heading_ = 0.0;

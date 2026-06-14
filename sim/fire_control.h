@@ -3,6 +3,7 @@
 #include <optional>
 
 #include "sim/ballistics.h"
+#include "sim/constants.h"
 #include "sim/environment.h"
 
 // Truth-based fire-control solution (charter §5.6 항목 3): finds the firing
@@ -30,8 +31,14 @@ class FireControlSolver {
  public:
   FireControlSolver(const Weather& weather, const RocketParams& rocket);
 
+  // launch_position / launch_velocity describe the launcher's deck and its
+  // inherited motion. The defaults (fixed deck at the origin, no inheritance)
+  // reproduce the legacy truth-based solution bit-for-bit; a moving own ship
+  // passes its launch pose so the solution compensates the platform velocity.
   std::optional<FiringSolution> solve(const math::Vec3& target_position,
-                                      const math::Vec3& target_velocity) const;
+                                      const math::Vec3& target_velocity,
+                                      const math::Vec3& launch_position = kLaunchPosition,
+                                      const math::Vec3& launch_velocity = math::Vec3{}) const;
 
  private:
   struct Probe {
@@ -40,8 +47,10 @@ class FireControlSolver {
     double miss_m = 0.0;
   };
   // Integrates one trajectory (mean wind, no gust/dispersion) and returns its
-  // closest approach to a static aim point.
-  Probe shoot(double azimuth_rad, double elevation_rad, const math::Vec3& aim) const;
+  // closest approach to a static aim point, from launch_position with the
+  // launcher's inherited launch_velocity added to the muzzle velocity.
+  Probe shoot(double azimuth_rad, double elevation_rad, const math::Vec3& aim,
+              const math::Vec3& launch_position, const math::Vec3& launch_velocity) const;
 
   Weather weather_;
   Atmosphere atmosphere_;

@@ -13,14 +13,20 @@
 namespace seashield::sim {
 
 struct JournalEntry {
+  enum class Kind : std::uint8_t { kFire = 0, kSteer = 1 };
   std::uint64_t tick = 0;
-  FireCommand command;
+  Kind kind = Kind::kFire;
+  FireCommand command;   // Valid when kind == kFire.
+  SteerCommand steer;    // Valid when kind == kSteer (own-ship maneuver).
 };
 
 class Journal {
  public:
   void record(std::uint64_t tick, const FireCommand& command) {
-    entries_.push_back({tick, command});
+    entries_.push_back({tick, JournalEntry::Kind::kFire, command, {}});
+  }
+  void record_steer(std::uint64_t tick, const SteerCommand& steer) {
+    entries_.push_back({tick, JournalEntry::Kind::kSteer, {}, steer});
   }
 
   const std::vector<JournalEntry>& entries() const { return entries_; }

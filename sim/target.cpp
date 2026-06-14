@@ -1,5 +1,7 @@
 #include "sim/target.h"
 
+#include <algorithm>
+
 namespace seashield::sim {
 
 double Target::flight_path_angle_rad() const {
@@ -23,7 +25,10 @@ math::Vec3 Target::velocity() const {
           speed_ * math::sin(gamma)};
 }
 
-void Target::step(double dt_s) {
+void Target::step(double dt_s, const math::Vec3& ship_pos) {
+  // Latch the own ship's pose so ground_range_m()/flight_path_angle_rad() and
+  // the terminal homing below all reference it (origin for a fixed platform).
+  ship_ref_ = ship_pos;
   if (destroyed_) {
     return;
   }
@@ -43,8 +48,24 @@ void Target::step(double dt_s) {
     phase_ = Phase::kTerminal;
   }
   if (phase_ == Phase::kTerminal) {
-    // Pure pursuit of a static point = straight line, refreshed per tick.
-    heading_ = math::atan2(-position_.x, -position_.y);
+    // Pure pursuit of the own ship, refreshed per tick. With an unlimited slew
+    // (the default) the heading snaps straight at the ship — the legacy instant
+    // homing. A finite cap lets a hard ship maneuver outrun the turn, so the
+    // missile overshoots and can be dodged (charter §5.3 종말 기동).
+    const double desired = math::atan2(ship_ref_.x - position_.x, ship_ref_.y - position_.y);
+    if (params_.terminal_turn_rate_max_rad_s <= 0.0) {
+      heading_ = desired;  // Unlimited: snap (bit-for-bit legacy).
+    } else {
+      double diff = desired - heading_;
+      while (diff > math::kPi) {
+        diff -= math::kTwoPi;
+      }
+      while (diff < -math::kPi) {
+        diff += math::kTwoPi;
+      }
+      const double max_step = params_.terminal_turn_rate_max_rad_s * dt_s;
+      heading_ += std::clamp(diff, -max_step, max_step);
+    }
   }
 
   // Speed splits into horizontal/vertical by the path angle; the horizontal

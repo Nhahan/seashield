@@ -30,7 +30,9 @@ FireControlSolver::FireControlSolver(const Weather& weather, const RocketParams&
       rocket_(rocket) {}
 
 FireControlSolver::Probe FireControlSolver::shoot(double azimuth_rad, double elevation_rad,
-                                                  const math::Vec3& aim) const {
+                                                  const math::Vec3& aim,
+                                                  const math::Vec3& launch_position,
+                                                  const math::Vec3& launch_velocity) const {
   FlightEnvironment env;
   env.atmosphere = &atmosphere_;
   env.wind = &wind_;
@@ -40,8 +42,8 @@ FireControlSolver::Probe FireControlSolver::shoot(double azimuth_rad, double ele
 
   const math::Vec3 dir = math::direction_from_az_el(azimuth_rad, elevation_rad);
   RocketState s;
-  s.position = kLaunchPosition;
-  s.velocity = dir * rocket_.rail_exit_speed_mps;
+  s.position = launch_position;
+  s.velocity = dir * rocket_.rail_exit_speed_mps + launch_velocity;
 
   Probe best;
   best.miss_m = (s.position - aim).norm();
@@ -66,7 +68,9 @@ FireControlSolver::Probe FireControlSolver::shoot(double azimuth_rad, double ele
 }
 
 std::optional<FiringSolution> FireControlSolver::solve(const math::Vec3& target_position,
-                                                       const math::Vec3& target_velocity) const {
+                                                       const math::Vec3& target_velocity,
+                                                       const math::Vec3& launch_position,
+                                                       const math::Vec3& launch_velocity) const {
   // Initial time-of-flight guess from an average ballistic speed.
   double time_of_flight = target_position.norm() / 450.0;
   double az = 0.0;
@@ -85,7 +89,7 @@ std::optional<FiringSolution> FireControlSolver::solve(const math::Vec3& target_
     // fixed-point oscillate instead of converge.
     az = math::atan2(aim.x, aim.y);
     const double ground_range = math::sqrt(aim.x * aim.x + aim.y * aim.y);
-    el = std::clamp(math::atan2(aim.z - kLaunchPosition.z, ground_range) +
+    el = std::clamp(math::atan2(aim.z - launch_position.z, ground_range) +
                         math::deg_to_rad(8.0),
                     kMinElevation, kDirectArcInitElevation);
 
@@ -97,7 +101,7 @@ std::optional<FiringSolution> FireControlSolver::solve(const math::Vec3& target_
 
     bool last_matches_angles = false;
     for (int iter = 0; iter < kMaxNewtonIterations; ++iter) {
-      last = shoot(az, el, aim);
+      last = shoot(az, el, aim, launch_position, launch_velocity);
       ++probes;
       last_matches_angles = true;
       if (last.miss_m < kConvergedMissM) {
@@ -108,8 +112,8 @@ std::optional<FiringSolution> FireControlSolver::solve(const math::Vec3& target_
       const double g0 = miss_vec.dot(up_axis);
 
       constexpr double kDelta = 1e-3;  // rad
-      const Probe paz = shoot(az + kDelta, el, aim);
-      const Probe pel = shoot(az, el + kDelta, aim);
+      const Probe paz = shoot(az + kDelta, el, aim, launch_position, launch_velocity);
+      const Probe pel = shoot(az, el + kDelta, aim, launch_position, launch_velocity);
       probes += 2;
       const math::Vec3 maz = paz.closest_point - aim;
       const math::Vec3 mel = pel.closest_point - aim;
@@ -134,7 +138,7 @@ std::optional<FiringSolution> FireControlSolver::solve(const math::Vec3& target_
     if (!last_matches_angles) {
       // The Newton loop ended right after taking a step: re-shoot so the
       // reported time/miss describe the angles actually being returned.
-      last = shoot(az, el, aim);
+      last = shoot(az, el, aim, launch_position, launch_velocity);
       ++probes;
     }
 

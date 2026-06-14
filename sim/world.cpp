@@ -14,14 +14,43 @@ World::World(const WorldConfig& config)
       wind_(config.weather.wind_layers),
       gust_(config.weather.turbulence_intensity * config.weather.surface_wind_speed(),
             config.gust_seed),
-      target_(config.target),
       radar_(config.radar, config.weather.rain_intensity, config.sim_seed),
       tracker_(config.tracker),
       solver_(config.weather, config.rocket),
       dispersion_rng_(config.sim_seed, /*stream=*/10),
-      pk_rng_(config.sim_seed, /*stream=*/11) {}
+      pk_rng_(config.sim_seed, /*stream=*/11) {
+  // targets_[0] is the primary target (the legacy single-target world when
+  // additional_targets is empty — bit-for-bit, the radar/Pk RNG order is
+  // unchanged for N=1; only state_hash() gains a count field).
+  targets_.emplace_back(config.target);
+  for (const TargetParams& extra : config.additional_targets) {
+    targets_.emplace_back(extra);
+  }
+  // Own ship: fixed platform at the origin unless the game mode configures a
+  // steerable hull. Pure kinematics, so N=1 RNG order is unaffected.
+  ship_.params = config.ship;
+  ship_.position = config.ship.initial_position;
+  ship_.heading_rad = config.ship.heading_rad;
+  ship_.speed_mps = config.ship.speed_mps;
+}
+
+void OwnShip::step(double dt_s) {
+  // Rudder slews the heading at a capped rate; throttle drives speed toward its
+  // set-point under an acceleration limit. Both limits default to zero, which
+  // pins a fixed platform at the origin (the legacy single-engagement world).
+  if (params.turn_rate_max_rad_s > 0.0) {
+    heading_rad += rudder * params.turn_rate_max_rad_s * dt_s;
+  }
+  const double target_speed = throttle * params.max_speed_mps;
+  const double max_dv = params.accel_mps2 * dt_s;
+  speed_mps += std::clamp(target_speed - speed_mps, -max_dv, max_dv);
+  position.x += speed_mps * math::sin(heading_rad) * dt_s;
+  position.y += speed_mps * math::cos(heading_rad) * dt_s;
+}
 
 void World::queue_fire(const FireCommand& command) { pending_.push_back(command); }
+
+void World::queue_steer(const SteerCommand& command) { pending_steer_.push_back(command); }
 
 FlightEnvironment World::flight_environment() const {
   FlightEnvironment env;
@@ -42,8 +71,12 @@ void World::launch(const ScheduledLaunch& launch) {
   Rocket rocket;
   rocket.id = next_rocket_id_++;
   rocket.launch_dir = math::direction_from_az_el(az, el);
-  rocket.state.position = kLaunchPosition;
-  rocket.state.velocity = rocket.launch_dir * config_.rocket.rail_exit_speed_mps;
+  // Launch from the ship's deck; the rocket inherits the ship's velocity. With
+  // a fixed platform this is kLaunchPosition and zero inheritance — identical
+  // to the legacy single-engagement world.
+  rocket.state.position = ship_.launch_position();
+  rocket.state.velocity =
+      rocket.launch_dir * config_.rocket.rail_exit_speed_mps + ship_.velocity();
   rockets_.push_back(rocket);
 }
 
@@ -89,20 +122,37 @@ void World::step() {
   // (3) Advance the gust process, (4) the target, (5) the rockets in id order.
   gust_.step(kTickDt);
 
-  const math::Vec3 target_prev = target_.position();
-  target_.step(kTickDt);
+  // (3b) Own ship: latch the latest held steer set-points, then integrate
+  // (no RNG). A fixed platform stays exactly at the origin, so the targets,
+  // radar and engagement below see the legacy geometry bit-for-bit.
+  for (const SteerCommand& s : pending_steer_) {
+    ship_.rudder = s.rudder;
+    ship_.throttle = s.throttle;
+  }
+  pending_steer_.clear();
+  ship_.step(kTickDt);
+
+  // (4) Step every target toward the ship's current pose; remember pre-move
+  // positions for the CPA test.
+  targets_prev_scratch_.clear();
+  for (Target& t : targets_) {
+    targets_prev_scratch_.push_back(t.position());
+    t.step(kTickDt, ship_.position);
+  }
 
   // (4b) Radar scan + (4c) tracker — the sensor chain observes the post-move
-  // target (charter §4.6 순서: 물리→레이더→추적→…→판정). A destroyed target
-  // returns no echoes, so its track coasts and dies naturally: kill
-  // assessment is sensor-based too (charter §2.1).
+  // targets (charter §4.6 순서: 물리→레이더→추적→…→판정). Scans all ALIVE targets
+  // (span order = targets_ order); a destroyed target returns no echoes so its
+  // track coasts and dies naturally. A single alive target reproduces the
+  // legacy detection RNG order bit-for-bit.
   plots_scratch_.clear();
-  if (!target_.destroyed()) {
-    const math::Vec3 target_truth = target_.position();
-    radar_.step(tick_, {&target_truth, 1}, plots_scratch_);
-  } else {
-    radar_.step(tick_, {}, plots_scratch_);
+  truths_scratch_.clear();
+  for (const Target& t : targets_) {
+    if (!t.destroyed()) {
+      truths_scratch_.push_back(t.position());
+    }
   }
+  radar_.step(tick_, truths_scratch_, plots_scratch_, ship_.position);
   tracker_.predict();
   if (!plots_scratch_.empty()) {
     tracker_.update(plots_scratch_, tick_);
@@ -125,30 +175,41 @@ void World::step() {
     if (!rocket.alive) {
       continue;
     }
-    const math::Vec3 rel_before = rocket.state.position - target_prev;
+    const math::Vec3 rocket_before = rocket.state.position;
     rocket_step(rocket.state, config_.rocket, env, rocket.launch_dir, kTickDt);
-    const math::Vec3 rel_after = rocket.state.position - target_.position();
 
-    // Linear relative motion within the tick (charter §5.7).
-    const math::Vec3 rel_vel = (rel_after - rel_before) * kTickRateHz;
-    const ClosestApproach cpa = closest_approach(rel_before, rel_vel, kTickDt);
-    rocket.best_miss_m = std::min(rocket.best_miss_m, cpa.distance_m);
+    // Closest approach to the NEAREST target this tick (linear relative motion,
+    // charter §5.7). For a single target this is bit-identical to the legacy
+    // path (one CPA, one nearest); the per-target loop only adds geometry, no
+    // RNG, until a detonation rolls Pk once against the nearest target.
+    double best_cpa = 1e30;
+    std::size_t best_idx = 0;
+    for (std::size_t ti = 0; ti < targets_.size(); ++ti) {
+      const math::Vec3 rel_before = rocket_before - targets_prev_scratch_[ti];
+      const math::Vec3 rel_after = rocket.state.position - targets_[ti].position();
+      const math::Vec3 rel_vel = (rel_after - rel_before) * kTickRateHz;
+      const ClosestApproach cpa = closest_approach(rel_before, rel_vel, kTickDt);
+      if (cpa.distance_m < best_cpa) {
+        best_cpa = cpa.distance_m;
+        best_idx = ti;
+      }
+    }
+    rocket.best_miss_m = std::min(rocket.best_miss_m, best_cpa);
 
-    if (cpa.distance_m < config_.rocket.proximity_fuze_radius_m) {
-      // The fuze does not know whether the target already died: every
-      // passage detonates and rolls its own Pk. would_kill is therefore the
-      // UNCAPPED per-rocket kill metric (보고서 §5); killed keeps the
-      // one-kill-per-engagement adjudication. The roll order is part of the
-      // determinism contract — goldens regenerated with this change.
-      const double pk = pk_from_miss(cpa.distance_m, config_.rocket.proximity_fuze_radius_m);
+    if (best_cpa < config_.rocket.proximity_fuze_radius_m) {
+      // The fuze does not know whether the nearest target already died: every
+      // passage detonates and rolls its own Pk. would_kill is the UNCAPPED
+      // per-rocket metric (보고서 §5); killed keeps the one-kill-per-target cap.
+      // Roll order is part of the determinism contract — goldens regenerated.
+      Target& hit = targets_[best_idx];
+      const double pk = pk_from_miss(best_cpa, config_.rocket.proximity_fuze_radius_m);
       const bool would_kill = pk_rng_.next_double() < pk;
-      const bool killed = would_kill && !target_.destroyed();
+      const bool killed = would_kill && !hit.destroyed();
       if (killed) {
-        target_.destroy();
+        hit.destroy();
       }
       char buf[96];
-      std::snprintf(buf, sizeof(buf), "rocket %u detonated: miss=%.1fm %s", rocket.id,
-                    cpa.distance_m,
+      std::snprintf(buf, sizeof(buf), "rocket %u detonated: miss=%.1fm %s", rocket.id, best_cpa,
                     killed       ? "KILL"
                     : would_kill ? "would-kill (target already dead)"
                                  : "no kill");
@@ -197,7 +258,8 @@ std::optional<FiringSolution> World::solve_for_track(std::uint32_t track_id,
   // The estimated state slots straight into the truth-based solver: both are
   // a (position, velocity) pair under CV extrapolation. Sensor noise rides in
   // unannounced — exactly the error propagation P4 exists to measure.
-  auto solution = solver_.solve(track->position(), track->velocity());
+  auto solution = solver_.solve(track->position(), track->velocity(), ship_.launch_position(),
+                                ship_.velocity());
   if (!solution.has_value()) {
     return fail(SolveForTrackError::kNoSolution);
   }
@@ -207,18 +269,36 @@ std::optional<FiringSolution> World::solve_for_track(std::uint32_t track_id,
 std::uint64_t World::state_hash() const {
   StateHasher hasher;
   hasher.mix(tick_);
-  hasher.mix(target_.position());
-  hasher.mix(target_.heading_rad());
-  hasher.mix(target_.speed_mps());
-  hasher.mix(target_.turn_rate_rad_s());
-  hasher.mix(target_.destroyed());
-  // ASM maneuver state (P4): the phase machine and the weave anchor are
-  // mutable state the legacy fields above cannot reconstruct.
-  hasher.mix(static_cast<std::uint64_t>(target_.phase()));
-  hasher.mix(target_.weaving());
-  hasher.mix(target_.weave_elapsed_s());
+  // All concurrent targets (count + each). N=1 is the legacy single-target
+  // world; the extra count field is why goldens regenerate for this change.
+  hasher.mix(static_cast<std::uint64_t>(targets_.size()));
+  for (const Target& t : targets_) {
+    hasher.mix(t.position());
+    hasher.mix(t.heading_rad());
+    hasher.mix(t.speed_mps());
+    hasher.mix(t.turn_rate_rad_s());
+    hasher.mix(t.destroyed());
+    // ASM maneuver state (P4): the phase machine and the weave anchor are
+    // mutable state the legacy fields above cannot reconstruct.
+    hasher.mix(static_cast<std::uint64_t>(t.phase()));
+    hasher.mix(t.weaving());
+    hasher.mix(t.weave_elapsed_s());
+  }
+  // Own-ship pose + held set-points. Constant (origin, zero) for the fixed
+  // platform, but still mixed — the added fields are why goldens regenerate
+  // for this change, and a moving ship must be reconstructible from the hash.
+  hasher.mix(ship_.position);
+  hasher.mix(ship_.heading_rad);
+  hasher.mix(ship_.speed_mps);
+  hasher.mix(ship_.rudder);
+  hasher.mix(ship_.throttle);
   // Queued/scheduled inputs are mutable state too: a replay that diverged in
   // command handling must not slip past the hash comparison.
+  hasher.mix(static_cast<std::uint64_t>(pending_steer_.size()));
+  for (const SteerCommand& s : pending_steer_) {
+    hasher.mix(s.rudder);
+    hasher.mix(s.throttle);
+  }
   hasher.mix(static_cast<std::uint64_t>(pending_.size()));
   for (const FireCommand& c : pending_) {
     hasher.mix(c.azimuth_rad);

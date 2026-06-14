@@ -10,12 +10,17 @@ std::string Journal::serialize() const {
   std::string out;
   char buf[256];
   for (const JournalEntry& e : entries_) {
-    std::snprintf(buf, sizeof(buf),
-                  "fire tick=%" PRIu64 " az=%.17g el=%.17g salvo=%d dispersion=%.17g "
-                  "interval=%.17g\n",
-                  e.tick, e.command.azimuth_rad, e.command.elevation_rad,
-                  e.command.salvo_count, e.command.dispersion_mrad,
-                  e.command.launch_interval_s);
+    if (e.kind == JournalEntry::Kind::kSteer) {
+      std::snprintf(buf, sizeof(buf), "steer tick=%" PRIu64 " rudder=%.17g throttle=%.17g\n",
+                    e.tick, e.steer.rudder, e.steer.throttle);
+    } else {
+      std::snprintf(buf, sizeof(buf),
+                    "fire tick=%" PRIu64 " az=%.17g el=%.17g salvo=%d dispersion=%.17g "
+                    "interval=%.17g\n",
+                    e.tick, e.command.azimuth_rad, e.command.elevation_rad,
+                    e.command.salvo_count, e.command.dispersion_mrad,
+                    e.command.launch_interval_s);
+    }
     out += buf;
   }
   return out;
@@ -27,6 +32,18 @@ std::optional<Journal> Journal::parse(const std::string& text) {
   std::string line;
   while (std::getline(stream, line)) {
     if (line.empty()) {
+      continue;
+    }
+    if (line.rfind("steer", 0) == 0) {
+      JournalEntry e;
+      e.kind = JournalEntry::Kind::kSteer;
+      const int matched =
+          std::sscanf(line.c_str(), "steer tick=%" SCNu64 " rudder=%lg throttle=%lg", &e.tick,
+                      &e.steer.rudder, &e.steer.throttle);
+      if (matched != 3) {
+        return std::nullopt;
+      }
+      journal.entries_.push_back(e);
       continue;
     }
     JournalEntry e;
