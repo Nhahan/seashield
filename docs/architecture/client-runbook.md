@@ -78,18 +78,24 @@ HUD가 비어 보인다 — 버그가 아니라 게이팅 동작).
 | `-SeaGamePlay` | 생존 게임 자동 사수: 탄착예측기로 요격해를 풀어 추적·사격(웨이브 진행). 마우스 없이 게임 루프를 캡처 검증 | PlayerController |
 | `-SeaManualPlay` | **사람 입력 경로** 검증용 자동 사수: 실제 마우스룩(Turn/LookUp)·Fire() 핸들러를 구동하고 화면 SOLUTION(탄착=리드)에서만 발사 — "HUD만으로 사람이 맞출 수 있는가" 검증 | PlayerController |
 | `-SeaShotSeq=초` | 지정 간격마다 함교 시점 스크린샷(게임 루프 필름스트립), `-SeaShotSeqQuit=초`(기본 42)에 종료 | GameMode |
+| `-SeaSteerDemo` | 무인 조타 데모: 전속 전진 + 6 s마다 타 반전(S-위빙), **사격 없음** — 함체/카메라 기동과 선회율 제한 ASM의 회피(dodge)를 캡처 검증 | PlayerController |
 
 ### 3b. 생존 게임 모드 (플레이어블)
 
 `scenarios/game.scn`(`game_mode = 1`)은 무유도 로켓으로 끝없이 침투하는 ASM 웨이브를
 요격하는 **플레이 가능한 생존 게임**이다. 서버는 단일교전 결정론 경로(리플레이·골든·
 전체 테스트)를 그대로 두고, 게임 모드에서만 `game_thread_main`이 웨이브마다 World를
-재시드 생성한다(방위/거리/고도/속도·날씨가 매번 다름, 난이도는 웨이브로 램프). 표적이
-함선 근방(`kShipHitRangeM` 250 m)에 도달하면 생명 1 감소, 0이면 게임 종료(AAR).
+재시드 생성한다(방위/거리/고도/속도·날씨가 매번 다름, 난이도는 웨이브로 램프). 자함은
+플레이어가 조타하는 기동 플랫폼(A/D 타·W/S 스로틀)이라, 종말 선회율이 제한된 ASM은
+하드 빔 기동으로 회피(dodge)할 수 있다(simulation-models §8b). 적의 공격(함선 피격)은
+`game_enemy_attack`로 on/off: **on**이면 표적이 함선 근방(`kShipHitRangeM` 140 m)에
+도달 시 생명 1 감소·0이면 게임 종료(AAR); **off(현재 game.scn 기본)**면 함선 무적 —
+표적이 슬쩍 지나가도 무피해, 끝없는 런(함선 피해 모델 정식화 전 개발용).
 와이어는 라운드 무관 monotonic tick + 풀 스냅샷(델타 off)로 라운드 경계를 안전화.
 
 직접 플레이(마우스 조준): **`client/SeaShield/Tools/play_game.sh`** — 서버를 띄우고
-함교 콘솔(마우스 선회, F/Space/LMB 사격, `[`/`]` 살보, `;`/`'` 산포)을 연다. HUD:
+함교 콘솔(마우스 선회, F/Space/LMB 사격, `[`/`]` 살보, `;`/`'` 산포, **A/D 타(조타)·W/S
+스로틀**로 함선 기동/회피)을 연다. HUD:
 조준선·탄착 pipper(앰버)·리드 고스트(시안, 겹치면 SOLUTION 녹색)·위협 readout(거리/접근
 속도/TTI)·화면밖 위협 화살표·웨이브/SPLASHED/생명·웨이브 배너.
 
