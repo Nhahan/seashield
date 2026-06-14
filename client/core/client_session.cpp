@@ -118,6 +118,11 @@ void ClientSession::request_fire(const protocol::FireRequest& fire) {
   pending_fire_.push_back(fire);
 }
 
+void ClientSession::request_steer(const protocol::ShipCommand& steer) {
+  const std::lock_guard<std::mutex> lock(fire_mutex_);
+  pending_steer_.push_back(steer);
+}
+
 bool ClientSession::run() {
   const auto started = steady_clock::now();
   const auto now_s = [&] { return duration<double>(steady_clock::now() - started).count(); };
@@ -269,13 +274,20 @@ bool ClientSession::run() {
       endpoint.send_unreliable(protocol::MsgType::kSnapshotAck, protocol::encode_payload(ack));
     }
     std::vector<protocol::FireRequest> fire_requests;
+    std::vector<protocol::ShipCommand> steer_requests;
     {
       const std::lock_guard<std::mutex> lock(fire_mutex_);
       fire_requests.swap(pending_fire_);
+      steer_requests.swap(pending_steer_);
     }
     for (const protocol::FireRequest& fire : fire_requests) {
       if (!send_control_frame(tcp.fd, protocol::encode_control_frame(fire))) {
         return fail("fire send failed");
+      }
+    }
+    for (const protocol::ShipCommand& steer : steer_requests) {
+      if (!send_control_frame(tcp.fd, protocol::encode_control_frame(steer))) {
+        return fail("steer send failed");
       }
     }
     flush_udp();

@@ -51,6 +51,8 @@ class ClientSession {
 
   // Thread-safe: queued and sent over TCP from the session loop.
   void request_fire(const protocol::FireRequest& fire);
+  // Thread-safe: own-ship steering set-point, sent over TCP like fire.
+  void request_steer(const protocol::ShipCommand& steer);
 
   // Thread-safe: the newest fully-assembled snapshot tick (v4 delta
   // baseline). Only the latest value matters, so this overwrites.
@@ -61,8 +63,9 @@ class ClientSession {
   ClientSessionCallbacks callbacks_;
   std::atomic<bool> stop_{false};
   std::atomic<std::int64_t> pending_ack_{-1};
-  std::mutex fire_mutex_;
+  std::mutex fire_mutex_;  // Guards both pending command queues below.
   std::vector<protocol::FireRequest> pending_fire_;
+  std::vector<protocol::ShipCommand> pending_steer_;
 };
 
 }  // namespace seashield::client
