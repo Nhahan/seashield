@@ -30,7 +30,10 @@ namespace seashield::protocol {
 // server streams FireSolution for confirmed tracks (low cadence).
 // v4 (P6): delta-compressed snapshots (SnapshotDelta) against the client's
 // acked baseline (SnapshotAck), plus the reconnect event backlog over TCP.
-inline constexpr std::uint16_t kProtocolVersion = 4;
+// v5 (P7+): the own ship is a steerable platform — a kOwnShip entity carries
+// its pose in snapshots and a ShipCommand control message carries rudder/
+// throttle (client -> server). Same loud-failure rationale as the v2 bump.
+inline constexpr std::uint16_t kProtocolVersion = 5;
 
 // Hard ceiling for one UDP datagram including the 12-byte packet header
 // (charter §6 "단편화 정책"): snapshots above this split into independently
@@ -44,6 +47,7 @@ enum class MsgType : std::uint8_t {
   kServerReject = 3,
   kFireRequest = 4,
   kEventBacklog = 5,  // Server -> client catch-up at UDP-bind time (v4).
+  kShipCommand = 6,   // Client -> server own-ship steering set-points (v5).
   // UDP data channels.
   kUdpHello = 16,
   kUdpHelloAck = 17,
@@ -74,7 +78,9 @@ enum class RejectReason : std::uint8_t {
 enum class EntityKind : std::uint8_t {
   kTarget = 0,
   kRocket = 1,
-  kTrack = 2,  // Kalman ESTIMATE of a target — what the consoles actually see.
+  kTrack = 2,    // Kalman ESTIMATE of a target — what the consoles actually see.
+  kOwnShip = 3,  // The player's platform pose (v5). Fills the last 2-bit slot
+                 // in the delta codec's kind field (DeltaEntity::kKindShift).
 };
 
 enum class EventKind : std::uint8_t {
@@ -185,6 +191,19 @@ struct FireRequest {
 
   void encode(Writer& w) const;
   static std::optional<FireRequest> decode(Reader& r);
+};
+
+// Own-ship steering set-points (v5). Mirrors sim::SteerCommand; the server
+// revalidates ranges and clamps before the command crosses into the sim
+// thread. Sent on change (rudder/throttle are held set-points), so it rides
+// the reliable TCP control channel like FireRequest, not the snapshot cadence.
+struct ShipCommand {
+  static constexpr MsgType kType = MsgType::kShipCommand;
+  double rudder = 0.0;    // -1..+1, + = turn to starboard.
+  double throttle = 0.0;  // 0..1, fraction of max speed.
+
+  void encode(Writer& w) const;
+  static std::optional<ShipCommand> decode(Reader& r);
 };
 
 // --- UDP data messages ------------------------------------------------------
@@ -386,7 +405,7 @@ struct EventBacklog {
 // --- Envelopes --------------------------------------------------------------
 
 using ControlMessage =
-    std::variant<ClientHello, ServerWelcome, ServerReject, FireRequest, EventBacklog>;
+    std::variant<ClientHello, ServerWelcome, ServerReject, FireRequest, EventBacklog, ShipCommand>;
 using DataMessage =
     std::variant<UdpHello, UdpHelloAck, Keepalive, Snapshot, EngagementEvent, FireSolution,
                  SnapshotAck, SnapshotDelta>;

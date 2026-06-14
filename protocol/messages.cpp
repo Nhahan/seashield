@@ -10,7 +10,9 @@ namespace {
 // catalogue instead of laundering them into the type system.
 bool valid_role(std::uint8_t v) { return v <= static_cast<std::uint8_t>(Role::kSolo); }
 bool valid_reject(std::uint8_t v) { return v <= static_cast<std::uint8_t>(RejectReason::kBadToken); }
-bool valid_entity_kind(std::uint8_t v) { return v <= static_cast<std::uint8_t>(EntityKind::kTrack); }
+bool valid_entity_kind(std::uint8_t v) {
+  return v <= static_cast<std::uint8_t>(EntityKind::kOwnShip);
+}
 bool valid_event_kind(std::uint8_t v) {
   return v <= static_cast<std::uint8_t>(EventKind::kRoundStart);
 }
@@ -142,6 +144,23 @@ std::optional<FireRequest> FireRequest::decode(Reader& r) {
   m.dispersion_mrad = r.f64();
   m.launch_interval_s = r.f64();
   m.track_id = r.u16();
+  if (!r.ok()) {
+    return std::nullopt;
+  }
+  return m;
+}
+
+// --- ShipCommand -------------------------------------------------------------
+
+void ShipCommand::encode(Writer& w) const {
+  w.f64(rudder);
+  w.f64(throttle);
+}
+
+std::optional<ShipCommand> ShipCommand::decode(Reader& r) {
+  ShipCommand m;
+  m.rudder = r.f64();
+  m.throttle = r.f64();
   if (!r.ok()) {
     return std::nullopt;
   }
@@ -568,6 +587,8 @@ std::optional<ControlMessage> decode_control_frame(std::span<const std::uint8_t>
       return decode_control_as<FireRequest>(r);
     case MsgType::kEventBacklog:
       return decode_control_as<EventBacklog>(r);
+    case MsgType::kShipCommand:
+      return decode_control_as<ShipCommand>(r);
     default:
       return std::nullopt;
   }
