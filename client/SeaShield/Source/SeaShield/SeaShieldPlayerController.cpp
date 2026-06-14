@@ -34,6 +34,7 @@ void ASeaShieldPlayerController::BeginPlay()
 	bGunFireDemo = FParse::Param(FCommandLine::Get(), TEXT("SeaGunFire"));
 	bGamePlayDemo = FParse::Param(FCommandLine::Get(), TEXT("SeaGamePlay"));
 	bManualPlayDemo = FParse::Param(FCommandLine::Get(), TEXT("SeaManualPlay"));
+	bSteerDemo = FParse::Param(FCommandLine::Get(), TEXT("SeaSteerDemo"));
 	if (FParse::Param(FCommandLine::Get(), TEXT("SeaLeadDemo")))
 	{
 		bManualPlayDemo = true;  // reuse the manual-play loop...
@@ -69,6 +70,30 @@ void ASeaShieldPlayerController::SetupInputComponent()
 	InputComponent->BindKey(EKeys::LeftMouseButton, IE_Pressed, this, &ASeaShieldPlayerController::Fire);
 	InputComponent->BindAxisKey(EKeys::MouseX, this, &ASeaShieldPlayerController::Turn);
 	InputComponent->BindAxisKey(EKeys::MouseY, this, &ASeaShieldPlayerController::LookUp);
+	// Helm: A/D rudder (momentary), W/S throttle (set-points). Free keys — they
+	// do not touch the mouse-look gun aim.
+	InputComponent->BindKey(EKeys::A, IE_Pressed, this, &ASeaShieldPlayerController::RudderLeftPressed);
+	InputComponent->BindKey(EKeys::A, IE_Released, this, &ASeaShieldPlayerController::RudderLeftReleased);
+	InputComponent->BindKey(EKeys::D, IE_Pressed, this, &ASeaShieldPlayerController::RudderRightPressed);
+	InputComponent->BindKey(EKeys::D, IE_Released, this, &ASeaShieldPlayerController::RudderRightReleased);
+	InputComponent->BindKey(EKeys::W, IE_Pressed, this, &ASeaShieldPlayerController::ThrottleAhead);
+	InputComponent->BindKey(EKeys::S, IE_Pressed, this, &ASeaShieldPlayerController::ThrottleStop);
+}
+
+void ASeaShieldPlayerController::RudderLeftPressed()  { bRudderLeft = true;  SendSteer(); }
+void ASeaShieldPlayerController::RudderLeftReleased() { bRudderLeft = false; SendSteer(); }
+void ASeaShieldPlayerController::RudderRightPressed()  { bRudderRight = true;  SendSteer(); }
+void ASeaShieldPlayerController::RudderRightReleased() { bRudderRight = false; SendSteer(); }
+void ASeaShieldPlayerController::ThrottleAhead() { CurrentThrottle = 1.0f; SendSteer(); }
+void ASeaShieldPlayerController::ThrottleStop()  { CurrentThrottle = 0.0f; SendSteer(); }
+
+void ASeaShieldPlayerController::SendSteer()
+{
+	if (USeaNetSubsystem* N = Net())
+	{
+		const float Rudder = (bRudderRight ? 1.0f : 0.0f) + (bRudderLeft ? -1.0f : 0.0f);
+		N->SteerShip(Rudder, CurrentThrottle);
+	}
 }
 
 void ASeaShieldPlayerController::Turn(float AxisValue)
@@ -116,13 +141,18 @@ void ASeaShieldPlayerController::Fire()
 void ASeaShieldPlayerController::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
-	if (!bOrderDemo && !bGunFireDemo && !bGamePlayDemo && !bManualPlayDemo)
+	if (!bOrderDemo && !bGunFireDemo && !bGamePlayDemo && !bManualPlayDemo && !bSteerDemo)
 	{
 		return;  // Live play needs no per-tick work; only the scripted demos do.
 	}
 	USeaNetSubsystem* N = Net();
 	if (N == nullptr || !N->IsWelcomed())
 	{
+		return;
+	}
+	if (bSteerDemo)
+	{
+		TickSteerDemo(DeltaSeconds);
 		return;
 	}
 	if (bGamePlayDemo)
@@ -370,5 +400,68 @@ void ASeaShieldPlayerController::TickManualPlayDemo(float DeltaSeconds)
 		UE_LOG(LogSeaInput, Display,
 		       TEXT("ManualPlay: FIRE on SOLUTION miss=%.1fm rng=%.0fm az=%.1f el=%.1f"), Aid.MissM,
 		       RangeM, G->AimAzimuthDeg(), G->AimElevationDeg());
+	}
+}
+
+void ASeaShieldPlayerController::TickSteerDemo(float DeltaSeconds)
+{
+	// Hands-off helm: flank ahead the whole time and reverse hard rudder every
+	// 6 s, carving an S-weave. No firing — the capture shows the frigate/camera
+	// maneuvering and turn-rate-limited ASMs overshooting the moving ship.
+	USeaNetSubsystem* N = Net();
+	if (N == nullptr)
+	{
+		return;
+	}
+	DemoElapsed += DeltaSeconds;
+	// Threat-aware evasive break: flank ahead and steer the hull BEAM-ON to the
+	// nearest inbound ASM, so the ship translates across the missile's aim. A
+	// committed beam run is what a turn-rate-limited terminal seeker cannot
+	// follow (the dodge), and it shows as obvious hull/camera motion in capture.
+	float Rudder = LastDemoRudder;
+	FSeaEntityState Ship;
+	const bool bHaveShip = N->GetOwnShip(Ship);
+	TArray<FSeaEntityState> Entities;
+	N->SampleEntities(Entities);
+	const FSeaEntityState* Threat = nullptr;
+	float Best = 1e30f;
+	for (const FSeaEntityState& E : Entities)
+	{
+		if (E.Kind != ESeaEntityKind::Target || E.State != 0)
+		{
+			continue;
+		}
+		const FVector Ref = bHaveShip ? Ship.Position : FVector::ZeroVector;
+		const float R = FVector::Dist2D(E.Position, Ref);
+		if (R < Best)
+		{
+			Best = R;
+			Threat = &E;
+		}
+	}
+	if (Threat != nullptr && bHaveShip)
+	{
+		// Compass headings (deg, CW from North): UE X=North, Y=East.
+		const float dN = Threat->Position.X - Ship.Position.X;
+		const float dE = Threat->Position.Y - Ship.Position.Y;
+		const float Los = FMath::RadiansToDegrees(FMath::Atan2(dE, dN));
+		const float Cur = Ship.Velocity.SizeSquared2D() > 4.0f
+		                      ? FMath::RadiansToDegrees(FMath::Atan2(Ship.Velocity.Y, Ship.Velocity.X))
+		                      : Los;
+		const float BeamA = Los + 90.0f;
+		const float BeamB = Los - 90.0f;
+		const float Desired = FMath::Abs(FMath::FindDeltaAngleDegrees(Cur, BeamA)) <=
+		                              FMath::Abs(FMath::FindDeltaAngleDegrees(Cur, BeamB))
+		                          ? BeamA
+		                          : BeamB;
+		Rudder = FMath::Clamp(FMath::FindDeltaAngleDegrees(Cur, Desired) / 30.0f, -1.0f, 1.0f);
+	}
+	if (!bSteerDemoInit || FMath::Abs(Rudder - LastDemoRudder) > 0.12f)
+	{
+		bSteerDemoInit = true;
+		LastDemoRudder = Rudder;
+		N->SteerShip(Rudder, 1.0f);
+		UE_LOG(LogSeaInput, Display, TEXT("SteerDemo: beam break rudder=%.2f throttle=1.0 t=%.1f"),
+		       Rudder, DemoElapsed);
 	}
 }

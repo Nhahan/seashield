@@ -44,10 +44,17 @@ public:
 	float InitialElevationDeg = 10.0f;
 
 	virtual void BeginPlay() override;
+	// The camera POSITION rides the own-ship pose each frame; the aim ROTATION
+	// stays world-referenced (a gyro-stabilized director), so steering and
+	// mouse-look never fight.
+	virtual void Tick(float DeltaSeconds) override;
 
 private:
 	UPROPERTY(VisibleAnywhere, Category = "SeaShield")
 	TObjectPtr<UCameraComponent> Camera;
+
+	UPROPERTY()
+	TObjectPtr<class USeaNetSubsystem> Net;
 
 	float AzimuthDeg = 45.0f;
 	float ElevationDeg = 18.0f;

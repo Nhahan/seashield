@@ -47,6 +47,20 @@ private:
 	void LookUp(float AxisValue);
 	ASeaGunnerPawn* Gunner() const;
 
+	// Helm: A/D are momentary rudder (hold to turn, release to center); W/S set
+	// the throttle (held set-points). Each change sends one ShipCommand. The
+	// world-referenced gun aim is independent, so steering never fights the mouse.
+	void RudderLeftPressed();
+	void RudderLeftReleased();
+	void RudderRightPressed();
+	void RudderRightReleased();
+	void ThrottleAhead();
+	void ThrottleStop();
+	void SendSteer();
+	bool bRudderLeft = false;
+	bool bRudderRight = false;
+	float CurrentThrottle = 0.0f;
+
 	UPROPERTY(EditAnywhere, Category = "SeaShield")
 	float MouseSensitivity = 0.35f;
 
@@ -87,4 +101,13 @@ private:
 	bool bNoLeadAim = false;
 	float ManualFireCooldown = 0.0f;
 	void TickManualPlayDemo(float DeltaSeconds);
+
+	// -SeaSteerDemo: a hands-off helm test — flank ahead and hard rudder, NO
+	// firing, so the capture shows the frigate (and camera) maneuvering and a
+	// turn-rate-limited ASM overshooting the moving ship (the dodge). Lives hold
+	// despite never shooting.
+	bool bSteerDemo = false;
+	bool bSteerDemoInit = false;
+	float LastDemoRudder = 0.0f;
+	void TickSteerDemo(float DeltaSeconds);
 };
