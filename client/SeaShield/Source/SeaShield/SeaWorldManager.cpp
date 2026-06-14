@@ -267,6 +267,56 @@ void ASeaWorldManager::HandleEngagementEvent(const FSeaEngagementEvent& Event)
 	       TEXT("Engagement event: kind=%d subject=%d detonated=%d killed=%d miss=%.1f"),
 	       Event.Kind, Event.SubjectId, Event.bDetonated ? 1 : 0, Event.bKilled ? 1 : 0,
 	       Event.MissDistanceM);
+
+	// Survival game (protocol::EventKind): a new wave (7) wipes the previous
+	// wave's actors/smoke so the reused entity ids never blend across waves; a
+	// ship hit (6) bursts over the deck for feedback.
+	if (Event.Kind == 7)
+	{
+		for (auto& Pair : Spawned)
+		{
+			if (Pair.Value.IsValid())
+			{
+				Pair.Value->Destroy();
+			}
+		}
+		Spawned.Reset();
+		for (auto& Pair : Trails)
+		{
+			if (Pair.Value.Ribbon.IsValid())
+			{
+				Pair.Value.Ribbon->DestroyComponent();
+			}
+		}
+		Trails.Reset();
+		for (FSplash& Sp : Splashes)
+		{
+			if (Sp.Column.IsValid())
+			{
+				Sp.Column->Destroy();
+			}
+		}
+		Splashes.Reset();
+		bLoggedFirstSpawn = false;
+		return;
+	}
+	if (Event.Kind == 6)
+	{
+		SpawnSplash(SeaWorldFrame::Origin + FVector(0.0, 0.0, 1200.0),
+		            GetWorld()->GetTimeSeconds(), /*bAirburst=*/true);
+		return;
+	}
+	if (Event.Kind == 2)  // kTargetDestroyed — a confirmed kill: burst on the target.
+	{
+		const int32 Key = (static_cast<int32>(ESeaEntityKind::Target) << 16) | Event.SubjectId;
+		const TWeakObjectPtr<AActor>* Actor = Spawned.Find(Key);
+		if (Actor != nullptr && Actor->IsValid())
+		{
+			SpawnSplash(Actor->Get()->GetActorLocation(), GetWorld()->GetTimeSeconds(),
+			            /*bAirburst=*/true);
+		}
+		return;
+	}
 	// Proximity bursts happen at altitude (airburst puff); rockets that never
 	// fuzed come down into the sea (water column at the surface).
 	const int32 Key = (static_cast<int32>(ESeaEntityKind::Rocket) << 16) | Event.SubjectId;

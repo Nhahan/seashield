@@ -17,6 +17,9 @@
 #include "SeaAfterActionWidget.h"
 #include "SeaEnvironmentController.h"
 #include "SeaFireControlPanel.h"
+#include "SeaGameHudWidget.h"
+#include "SeaGunnerPawn.h"
+#include "SeaGunsightWidget.h"
 #include "SeaPpiWidget.h"
 #include "SeaShieldPlayerController.h"
 #include "SeaWorldFrame.h"
@@ -38,10 +41,9 @@ void EnsureSingleton(UWorld* World)
 
 ASeaShieldGameModeBase::ASeaShieldGameModeBase()
 {
-	// The flying DefaultPawn carries a visible sphere mesh that photobombs
-	// captures; the spectator pawn flies the same but draws nothing.
-	DefaultPawnClass = ASpectatorPawn::StaticClass();
-	// Custom controller carries the weapons-operator input (fire order + fire).
+	// The player IS the gun director: a first-person sight on the launcher that
+	// the mouse aims and FIRE shoots down the bore.
+	DefaultPawnClass = ASeaGunnerPawn::StaticClass();
 	PlayerControllerClass = ASeaShieldPlayerController::StaticClass();
 }
 
@@ -83,6 +85,19 @@ void ASeaShieldGameModeBase::BeginPlay()
 	{
 		Panel->PpiRef = Ppi;
 		Panel->AddToViewport(10);
+	}
+	// Gun sight: center reticle + target designators over the 3D view.
+	if (USeaGunsightWidget* Sight =
+	        CreateWidget<USeaGunsightWidget>(GetWorld(), USeaGunsightWidget::StaticClass()))
+	{
+		Sight->AddToViewport(5);
+	}
+	// Survival-game HUD: wave / score / lives + transient banners (self-hides
+	// outside game-mode scenarios).
+	if (USeaGameHudWidget* GameHud =
+	        CreateWidget<USeaGameHudWidget>(GetWorld(), USeaGameHudWidget::StaticClass()))
+	{
+		GameHud->AddToViewport(15);
 	}
 	// After-action review — hidden until the engagement ends (kEngagementEnd),
 	// then centered over the scene. Above the HUD layer so it reads as a card.
@@ -136,6 +151,29 @@ void ASeaShieldGameModeBase::BeginPlay()
 		GetWorld()->GetTimerManager().SetTimer(
 		    QuitOnly, []() { FPlatformMisc::RequestExit(false); }, FMath::Max(QuitDelay, 1.0f),
 		    false);
+	}
+
+	// -SeaShotSeq=<interval>: take a screenshot every <interval> seconds from the
+	// player's own view (a filmstrip of the whole survival loop in one run) and
+	// quit at -SeaShotSeqQuit (default 42 s). For verifying the playable game.
+	float SeqInterval = 0.0f;
+	if (FParse::Value(FCommandLine::Get(), TEXT("SeaShotSeq="), SeqInterval) && SeqInterval > 0.1f)
+	{
+		TSharedRef<int32> Counter = MakeShared<int32>(0);
+		FTimerHandle SeqTimer;
+		GetWorld()->GetTimerManager().SetTimer(
+		    SeqTimer,
+		    [Counter]()
+		    {
+			    const FString Name = FString::Printf(TEXT("SeaSeq%02d.png"), (*Counter)++);
+			    FScreenshotRequest::RequestScreenshot(Name, /*bShowUI=*/true, false);
+		    },
+		    SeqInterval, true);
+		float SeqQuit = 42.0f;
+		FParse::Value(FCommandLine::Get(), TEXT("SeaShotSeqQuit="), SeqQuit);
+		FTimerHandle SeqQuitTimer;
+		GetWorld()->GetTimerManager().SetTimer(
+		    SeqQuitTimer, []() { FPlatformMisc::RequestExit(false); }, SeqQuit, false);
 	}
 
 	float ShotDelay = 0.0f;

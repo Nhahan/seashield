@@ -132,6 +132,28 @@ public:
 			          Data->ScopeColor);
 		}
 
+		// Engagement envelope: the effective unguided kill band (Rmin..Rmax).
+		// Shots outside it are low-Pk (too far = the target out-maneuvers the long
+		// flight + huge dispersion; too close = no time to correct), so the scope
+		// shows the window the operator must wait for — matches the gun sight's
+		// IN-ENVELOPE / HOLD cue (SeaGunsightWidget kEnvMin/MaxM).
+		{
+			const float MtoPx = Radius / FMath::Max(Data->DisplayRangeM, 1.0f);
+			const FLinearColor EnvCol(0.35f, 1.0f, 0.5f, 0.5f);
+			const float RminPx = 600.0f * MtoPx;
+			const float RmaxPx = 4500.0f * MtoPx;
+			if (RminPx > 2.0f && RminPx < Radius)
+			{
+				DrawLines(OutDrawElements, LayerId, AllottedGeometry,
+				          CirclePoints(Center, RminPx), EnvCol, 1.3f);
+			}
+			if (RmaxPx < Radius)
+			{
+				DrawLines(OutDrawElements, LayerId, AllottedGeometry,
+				          CirclePoints(Center, RmaxPx), EnvCol, 1.3f);
+			}
+		}
+
 		// Rotating sweep with a short trailing fade.
 		for (int32 Trail = 0; Trail < 6; ++Trail)
 		{

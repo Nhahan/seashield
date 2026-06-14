@@ -10,6 +10,8 @@
 #include "client/core/coords.h"
 #include "protocol/messages.h"
 
+#include "SeaBallistics.h"
+
 DEFINE_LOG_CATEGORY_STATIC(LogSeaShield, Log, All);
 
 namespace protocol = seashield::protocol;
@@ -168,12 +170,14 @@ void USeaNetSubsystem::Deinitialize()
 	Super::Deinitialize();
 }
 
-void USeaNetSubsystem::Tick(float)
+void USeaNetSubsystem::Tick(float DeltaTime)
 {
 	if (Runnable == nullptr)
 	{
 		return;
 	}
+	ClockS += DeltaTime;
+	LeadError.AgeS += DeltaTime;
 	protocol::ServerWelcome welcome;
 	while (Runnable->Welcomes.Dequeue(welcome))
 	{
@@ -186,6 +190,55 @@ void USeaNetSubsystem::Tick(float)
 		       TEXT("Welcomed: role=%d wind=(%.1f, %.1f) m/s rain=%.2f gust_sigma=%.2f"),
 		       static_cast<int32>(AssignedRole), welcome.surface_wind_east_mps,
 		       welcome.surface_wind_north_mps, Weather.RainIntensity, Weather.GustSigmaMps);
+	}
+	// Events are drained BEFORE snapshots: a kRoundStart resets the snapshot
+	// pipeline (the previous wave's entities must not interpolate across the map
+	// into the new target), and the fresh wave's snapshot — which may ride the
+	// very same frame — then repopulates it.
+	protocol::EngagementEvent event;
+	while (Runnable->Events.Dequeue(event))
+	{
+		const uint64 EventKey = (static_cast<uint64>(event.kind) << 48) |
+		                        (static_cast<uint64>(event.subject_id) << 32) |
+		                        static_cast<uint64>(event.tick);
+		bool bAlreadySeen = false;
+		SeenEventKeys.Add(EventKey, &bAlreadySeen);
+		if (bAlreadySeen)
+		{
+			continue;
+		}
+		// Survival-game scoreboard, reconstructed from the event stream.
+		switch (static_cast<protocol::EventKind>(event.kind))
+		{
+		case protocol::EventKind::kRoundStart:
+			GameState.Wave = event.subject_id;
+			GameState.bGameOver = false;
+			Assembler = seashield::client::SnapshotAssembler{};
+			Interp = seashield::client::InterpolationBuffer{};
+			PendingShots.Reset();  // stale shots would compare against the new wave's target
+			LeadError = FSeaLeadError{};
+			break;
+		case protocol::EventKind::kTargetDestroyed:
+			++GameState.Kills;
+			break;
+		case protocol::EventKind::kTargetHitShip:
+			++GameState.Leaks;
+			GameState.Lives = FMath::Max(0, GameState.MaxLives - GameState.Leaks);
+			break;
+		case protocol::EventKind::kEngagementEnd:
+			GameState.bGameOver = true;
+			break;
+		default:
+			break;
+		}
+		FSeaEngagementEvent out;
+		out.Kind = static_cast<uint8>(event.kind);
+		out.SubjectId = event.subject_id;
+		out.Tick = static_cast<int64>(event.tick);
+		out.MissDistanceM = event.miss_distance_m;
+		out.bDetonated = event.detonated;
+		out.bKilled = event.killed;
+		OnEngagementEvent.Broadcast(out);
 	}
 	protocol::Snapshot batch;
 	while (Runnable->Snapshots.Dequeue(batch))
@@ -212,27 +265,6 @@ void USeaNetSubsystem::Tick(float)
 			Interp.push(MoveTemp(*done));
 		}
 	}
-	protocol::EngagementEvent event;
-	while (Runnable->Events.Dequeue(event))
-	{
-		const uint64 EventKey = (static_cast<uint64>(event.kind) << 48) |
-		                        (static_cast<uint64>(event.subject_id) << 32) |
-		                        static_cast<uint64>(event.tick);
-		bool bAlreadySeen = false;
-		SeenEventKeys.Add(EventKey, &bAlreadySeen);
-		if (bAlreadySeen)
-		{
-			continue;
-		}
-		FSeaEngagementEvent out;
-		out.Kind = static_cast<uint8>(event.kind);
-		out.SubjectId = event.subject_id;
-		out.Tick = static_cast<int64>(event.tick);
-		out.MissDistanceM = event.miss_distance_m;
-		out.bDetonated = event.detonated;
-		out.bKilled = event.killed;
-		OnEngagementEvent.Broadcast(out);
-	}
 	protocol::FireSolution solution;
 	while (Runnable->Solutions.Dequeue(solution))
 	{
@@ -257,6 +289,51 @@ void USeaNetSubsystem::Tick(float)
 				FireAtTrack(out.TrackId, 0.0f, 0.0f, PendingDevSalvo, 3.0f);
 				PendingDevSalvo = 0;
 			}
+		}
+	}
+
+	// Mature lead-error shots: one time-of-flight after firing, compare the
+	// threat's actual position with where we predicted it would be (the lead we
+	// committed to). The split into along-track / vertical is the learnable
+	// error — and the measure of how a maneuvering target beats an unguided shot.
+	if (PendingShots.Num() > 0)
+	{
+		TArray<FSeaEntityState> Sample;
+		SampleEntities(Sample);
+		const FSeaEntityState* Target = nullptr;
+		for (const FSeaEntityState& E : Sample)
+		{
+			if (E.Kind == ESeaEntityKind::Target && E.State == 0)
+			{
+				Target = &E;
+				break;
+			}
+		}
+		for (int32 i = 0; i < PendingShots.Num();)
+		{
+			if (ClockS < PendingShots[i].MatureAtS)
+			{
+				++i;
+				continue;
+			}
+			if (Target != nullptr)
+			{
+				// Decompose the miss in the LOS-relative orthonormal frame
+				// (ship -> committed intercept): lateral (right+) / up / along-LOS
+				// (long+). Orthonormal, so a diving target no longer double-counts.
+				const FVector Miss = Target->Position - PendingShots[i].PredictedUeCm;  // UE cm
+				const FVector LosH =
+				    FVector(PendingShots[i].PredictedUeCm.X, PendingShots[i].PredictedUeCm.Y, 0.0)
+				        .GetSafeNormal();
+				const FVector Cross = FVector::CrossProduct(FVector::UpVector, LosH).GetSafeNormal();
+				LeadError.bValid = true;
+				LeadError.MissM = Miss.Size() / 100.0f;
+				LeadError.LateralM = FVector::DotProduct(Miss, Cross) / 100.0f;
+				LeadError.UpM = Miss.Z / 100.0f;
+				LeadError.LongM = FVector::DotProduct(Miss, LosH) / 100.0f;
+				LeadError.AgeS = 0.0f;
+			}
+			PendingShots.RemoveAt(i);
 		}
 	}
 }
@@ -356,4 +433,32 @@ void USeaNetSubsystem::FireManual(float AzimuthDeg, float ElevationDeg, int32 Sa
 	fire.salvo_count = static_cast<uint8>(SalvoCount);
 	fire.dispersion_mrad = DispersionMrad;
 	Runnable->Session.request_fire(fire);
+
+	// Snapshot the committed lead solution so we can measure, one time-of-flight
+	// later, how far the threat slipped out of it (GetLeadError / the thesis).
+	TArray<FSeaEntityState> Entities;
+	SampleEntities(Entities);
+	for (const FSeaEntityState& E : Entities)
+	{
+		if (E.Kind != ESeaEntityKind::Target || E.State != 0)
+		{
+			continue;
+		}
+		const FVector WindCms = Weather.WindCms;
+		const FVector WindEnu(WindCms.Y / 100.0, WindCms.X / 100.0, WindCms.Z / 100.0);
+		const FVector TPosEnu(E.Position.Y / 100.0, E.Position.X / 100.0, E.Position.Z / 100.0);
+		const FVector TVelEnu(E.Velocity.Y / 100.0, E.Velocity.X / 100.0, E.Velocity.Z / 100.0);
+		const SeaBallistics::FFireAid Aid =
+		    SeaBallistics::ComputeFireAid(AzimuthDeg, ElevationDeg, WindEnu, TPosEnu, TVelEnu);
+		if (Aid.bValid && Aid.TimeOfFlightS > 0.1f)
+		{
+			FPendingShot Shot;
+			// Predicted intercept (the lead solution) back into UE cm.
+			Shot.PredictedUeCm = FVector(Aid.LeadEnu.Y * 100.0, Aid.LeadEnu.X * 100.0,
+			                             Aid.LeadEnu.Z * 100.0);
+			Shot.MatureAtS = ClockS + Aid.TimeOfFlightS;
+			PendingShots.Add(Shot);
+		}
+		break;
+	}
 }

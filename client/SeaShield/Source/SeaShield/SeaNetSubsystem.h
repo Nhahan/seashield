@@ -74,6 +74,23 @@ struct FSeaEngagementEvent
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FSeaEngagementEventSignature, const FSeaEngagementEvent&, Event);
 
+// Survival-game scoreboard, derived entirely from the engagement event stream
+// (kRoundStart / kTargetDestroyed / kTargetHitShip / kEngagementEnd). The
+// server holds the authoritative lives count; the console reconstructs it so no
+// extra wire message is needed. MaxLives mirrors the scenario's game_lives.
+USTRUCT(BlueprintType)
+struct FSeaGameState
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "SeaShield") int32 Wave = 0;      // 0 = not started.
+	UPROPERTY(BlueprintReadOnly, Category = "SeaShield") int32 Kills = 0;
+	UPROPERTY(BlueprintReadOnly, Category = "SeaShield") int32 Leaks = 0;     // Targets that hit the ship.
+	UPROPERTY(BlueprintReadOnly, Category = "SeaShield") int32 Lives = 3;
+	UPROPERTY(BlueprintReadOnly, Category = "SeaShield") int32 MaxLives = 3;
+	UPROPERTY(BlueprintReadOnly, Category = "SeaShield") bool bGameOver = false;
+};
+
 // Owns the network thread (FSeaNetRunnable wrapping the headlessly-tested
 // seashield::client::ClientSession) and the game-thread snapshot pipeline
 // (assembler -> interpolation buffer). All UFUNCTION surface runs on the
@@ -138,6 +155,32 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "SeaShield")
 	FSeaEngagementEventSignature OnEngagementEvent;
 
+	// Survival-game scoreboard (game_mode scenarios). Wave 0 means the run has
+	// not begun or this is a plain single engagement.
+	UFUNCTION(BlueprintPure, Category = "SeaShield")
+	FSeaGameState GetGameState() const { return GameState; }
+
+	// Lead-error of the most recent salvo: at fire time the client snapshots the
+	// predicted intercept (the lead solution it committed to); one time-of-flight
+	// later it compares the threat's ACTUAL position. The gap is decomposed in the
+	// LOS-relative orthonormal frame (ship->intercept) so the axes are honest and
+	// independent (a diving target no longer double-counts along/vertical):
+	//   LateralM  cross-LOS, horizontal: + = right of the line of sight
+	//   UpM       vertical:              + = high
+	//   LongM     along-LOS:             + = long (past the target's range)
+	// — how far a maneuvering threat slipped out of the committed unguided
+	// solution, the project's thesis made measurable. Purely client-side.
+	struct FSeaLeadError
+	{
+		bool bValid = false;
+		float MissM = 0.0f;     // magnitude (m)
+		float LateralM = 0.0f;  // + right / - left   (aim correction)
+		float UpM = 0.0f;       // + high  / - low
+		float LongM = 0.0f;     // + long  / - short  (range/timing)
+		float AgeS = 999.0f;    // seconds since measured (for transient display)
+	};
+	FSeaLeadError GetLeadError() const { return LeadError; }
+
 	// --- UGameInstanceSubsystem ---
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
@@ -169,6 +212,18 @@ private:
 	float OrderDispersionMrad = 3.0f;  // pattern spread (0..20)
 	float OrderAzTrimDeg = 0.0f;     // operator trim, server clamps to +-15
 	float OrderElTrimDeg = 0.0f;
+	FSeaGameState GameState;
+
+	// Lead-error tracking (client-only). A shot pushes its predicted intercept;
+	// after one time-of-flight the actual threat position is compared.
+	struct FPendingShot
+	{
+		FVector PredictedUeCm = FVector::ZeroVector;  // committed intercept (rel. origin)
+		double MatureAtS = 0.0;
+	};
+	TArray<FPendingShot> PendingShots;
+	double ClockS = 0.0;
+	FSeaLeadError LeadError;
 	// (kind, subject, tick) dedup — the v4 bind-time TCP event backlog may
 	// overlap the live UDP stream at the boundary (client_session.cpp leaves
 	// dedup to the consumer by design).
