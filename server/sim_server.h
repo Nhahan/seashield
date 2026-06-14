@@ -202,6 +202,14 @@ class SimServer {
 
   // --- simulation thread ---
   void sim_thread_main();
+  // Survival game mode (scenario game_mode=1): an endless sequence of reseeded
+  // single-target waves with lives/score. Strictly separate from the
+  // deterministic single-engagement path above, which it never touches.
+  void game_thread_main();
+  // Appends one tick's entity records (target + alive rockets + track
+  // estimates) to a snapshot output. Shared by both sim-thread paths so the
+  // wire encoding stays identical.
+  void append_world_snapshot(SimOutput& output, const sim::World& world) const;
 
   SimServerConfig config_;
   SimServerStats stats_;

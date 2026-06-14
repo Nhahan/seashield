@@ -715,6 +715,10 @@ void SimServer::route_data_message(LogicalSession& session, protocol::MsgType ty
 // --- simulation thread -----------------------------------------------------------
 
 void SimServer::sim_thread_main() {
+  if (config_.scenario.game_mode) {
+    game_thread_main();  // Survival waves — a wholly separate lifecycle.
+    return;
+  }
   sim::World world(config_.scenario.config);
   const auto duration_ticks =
       static_cast<std::uint64_t>(std::llround(config_.scenario.duration_s * sim::kTickRateHz));
@@ -851,54 +855,7 @@ void SimServer::sim_thread_main() {
       output.tick = static_cast<std::uint32_t>(world.tick());
       output.phase =
           running ? protocol::EngagementPhase::kRunning : protocol::EngagementPhase::kEnded;
-      protocol::EntityRecord target_record;
-      target_record.id = 0;
-      target_record.kind = protocol::EntityKind::kTarget;
-      target_record.state = world.target().destroyed() ? 1 : 0;
-      const math::Vec3& target_pos = world.target().position();
-      const math::Vec3 target_vel = world.target().velocity();
-      target_record.pos_x = target_pos.x;
-      target_record.pos_y = target_pos.y;
-      target_record.pos_z = target_pos.z;
-      target_record.vel_x = target_vel.x;
-      target_record.vel_y = target_vel.y;
-      target_record.vel_z = target_vel.z;
-      output.entities.push_back(target_record);
-      for (const sim::Rocket& rocket : rockets) {
-        if (!rocket.alive) {
-          continue;  // Resolved rockets live on as events, not entities.
-        }
-        protocol::EntityRecord record;
-        record.id = static_cast<std::uint16_t>(rocket.id);
-        record.kind = protocol::EntityKind::kRocket;
-        record.state = rocket.state.age_s < config_.scenario.config.rocket.burn_time_s ? 0 : 1;
-        record.pos_x = rocket.state.position.x;
-        record.pos_y = rocket.state.position.y;
-        record.pos_z = rocket.state.position.z;
-        record.vel_x = rocket.state.velocity.x;
-        record.vel_y = rocket.state.velocity.y;
-        record.vel_z = rocket.state.velocity.z;
-        output.entities.push_back(record);
-      }
-      // The estimate stream (what consoles actually plot, charter §5.5):
-      // tracks ride the same snapshot with their quality in the flags byte.
-      for (const sim::Track& track : world.tracker().tracks()) {
-        protocol::EntityRecord record;
-        record.id = static_cast<std::uint16_t>(track.id);
-        record.kind = protocol::EntityKind::kTrack;
-        record.state = track.coasting() ? 2 : static_cast<std::uint8_t>(track.status);
-        record.flags =
-            protocol::quantize_track_sigma(std::sqrt(track.filter.position_variance()));
-        const math::Vec3 estimate_pos = track.position();
-        const math::Vec3 estimate_vel = track.velocity();
-        record.pos_x = estimate_pos.x;
-        record.pos_y = estimate_pos.y;
-        record.pos_z = estimate_pos.z;
-        record.vel_x = estimate_vel.x;
-        record.vel_y = estimate_vel.y;
-        record.vel_z = estimate_vel.z;
-        output.entities.push_back(record);
-      }
+      append_world_snapshot(output, world);
     }
 
     // 4b. Fire solutions for confirmed tracks at their own low cadence. The
@@ -977,6 +934,325 @@ void SimServer::sim_thread_main() {
     } else if (now - next_tick_at > 10 * tick_period) {
       SS_LOG_WARN("sim thread fell behind by %lld ms; resyncing",
                   static_cast<long long>(duration_cast<milliseconds>(now - next_tick_at).count()));
+      next_tick_at = now;
+    }
+  }
+}
+
+void SimServer::append_world_snapshot(SimOutput& output, const sim::World& world) const {
+  protocol::EntityRecord target_record;
+  target_record.id = 0;
+  target_record.kind = protocol::EntityKind::kTarget;
+  target_record.state = world.target().destroyed() ? 1 : 0;
+  const math::Vec3& target_pos = world.target().position();
+  const math::Vec3 target_vel = world.target().velocity();
+  target_record.pos_x = target_pos.x;
+  target_record.pos_y = target_pos.y;
+  target_record.pos_z = target_pos.z;
+  target_record.vel_x = target_vel.x;
+  target_record.vel_y = target_vel.y;
+  target_record.vel_z = target_vel.z;
+  output.entities.push_back(target_record);
+  for (const sim::Rocket& rocket : world.rockets()) {
+    if (!rocket.alive) {
+      continue;  // Resolved rockets live on as events, not entities.
+    }
+    protocol::EntityRecord record;
+    record.id = static_cast<std::uint16_t>(rocket.id);
+    record.kind = protocol::EntityKind::kRocket;
+    record.state = rocket.state.age_s < config_.scenario.config.rocket.burn_time_s ? 0 : 1;
+    record.pos_x = rocket.state.position.x;
+    record.pos_y = rocket.state.position.y;
+    record.pos_z = rocket.state.position.z;
+    record.vel_x = rocket.state.velocity.x;
+    record.vel_y = rocket.state.velocity.y;
+    record.vel_z = rocket.state.velocity.z;
+    output.entities.push_back(record);
+  }
+  // The estimate stream (what consoles actually plot, charter §5.5): tracks
+  // ride the same snapshot with their quality in the flags byte.
+  for (const sim::Track& track : world.tracker().tracks()) {
+    protocol::EntityRecord record;
+    record.id = static_cast<std::uint16_t>(track.id);
+    record.kind = protocol::EntityKind::kTrack;
+    record.state = track.coasting() ? 2 : static_cast<std::uint8_t>(track.status);
+    record.flags = protocol::quantize_track_sigma(std::sqrt(track.filter.position_variance()));
+    const math::Vec3 estimate_pos = track.position();
+    const math::Vec3 estimate_vel = track.velocity();
+    record.pos_x = estimate_pos.x;
+    record.pos_y = estimate_pos.y;
+    record.pos_z = estimate_pos.z;
+    record.vel_x = estimate_vel.x;
+    record.vel_y = estimate_vel.y;
+    record.vel_z = estimate_vel.z;
+    output.entities.push_back(record);
+  }
+}
+
+void SimServer::game_thread_main() {
+  // Survival mode: an endless sequence of single-target waves. Each wave is a
+  // freshly RESEEDED sim::World, so the deterministic engine is reused verbatim
+  // — only the orchestration (lives, scoring, wave variety, the cross-wave
+  // monotonic WIRE tick) lives here. No journaling: deterministic replay is the
+  // single-engagement path's job (charter §5.8).
+  const auto tick_period = nanoseconds(16'666'667);  // 1/60 s.
+  constexpr double kShipHitRangeM = 250.0;  // A live target this close = a leak.
+  const auto kDisplayTicks = static_cast<std::uint64_t>(2.0 * sim::kTickRateHz);  // VFX hold.
+  const auto kRoundTimeoutTicks = static_cast<std::uint64_t>(45.0 * sim::kTickRateHz);
+  const std::uint64_t fire_solution_interval =
+      config_.scenario.fire_solution_rate_hz > 0.0
+          ? std::max<std::uint64_t>(
+                1, static_cast<std::uint64_t>(
+                       sim::kTickRateHz / config_.scenario.fire_solution_rate_hz + 0.5))
+          : 0;
+
+  // Per-wave world config: reseed the RNG streams + weather and roll a fresh
+  // inbound ASM (bearing/range/altitude/speed) so no two waves play the same.
+  auto make_cfg = [&](int wave) -> sim::WorldConfig {
+    sim::WorldConfig cfg = config_.scenario.config;
+    const std::uint64_t spread =
+        static_cast<std::uint64_t>(wave) * config_.scenario.game_seed_stride;
+    cfg.sim_seed = config_.scenario.config.sim_seed + spread;
+    cfg.gust_seed = config_.scenario.config.gust_seed + spread + 0x1234ULL;
+    cfg.weather =
+        sim::WeatherGenerator::generate(config_.scenario.weather_seed + static_cast<std::uint64_t>(wave));
+    Pcg32 rng(config_.scenario.weather_seed + 0x9E3779B97F4A7C15ULL,
+              static_cast<std::uint64_t>(wave) + 1);
+    const double bearing = rng.next_double() * math::kTwoPi;
+    const double range_m = 4500.0 + rng.next_double() * 3500.0;  // 4.5–8 km out.
+    const double alt_m = 150.0 + rng.next_double() * 700.0;      // 150–850 m.
+    const double east = range_m * math::sin(bearing);
+    const double north = range_m * math::cos(bearing);
+    cfg.target.initial_position = {east, north, alt_m};
+    // Drive it AT the ship: small course offset only, and the terminal phase
+    // homes onto the origin — so an unengaged target reliably hits (stakes are
+    // real, rounds resolve). Difficulty ramps with the wave.
+    const double inbound = math::atan2(-east, -north);
+    const double offset_deg = 8.0;
+    cfg.target.heading_rad = inbound + (rng.next_double() - 0.5) * math::deg_to_rad(offset_deg);
+    const double ramp = static_cast<double>(std::min(wave - 1, 8));  // 0..8 over waves.
+    cfg.target.speed_mps = 170.0 + 0.5 * ramp * 30.0 + rng.next_double() * 90.0;  // ~170–340.
+    cfg.target.turn_rate_rad_s = 0.0;
+    // A credible ASM: cruise in, pop up near the ship and dive onto it. Weave
+    // grows with the wave so early waves are catchable and later ones force you
+    // to read the maneuver (the whole point of unguided gunnery).
+    cfg.target.popup_range_m = 3000.0 + rng.next_double() * 1000.0;
+    cfg.target.popup_altitude_m = 240.0;
+    cfg.target.weave_range_m = wave <= 1 ? 0.0 : (2500.0 + rng.next_double() * 1500.0);
+    cfg.target.weave_turn_rate_rad_s = math::deg_to_rad(4.0 + ramp * 1.2 + rng.next_double() * 4.0);
+    cfg.target.weave_period_s = 3.0 + rng.next_double() * 3.0;
+    return cfg;
+  };
+
+  enum class Phase { kRunning, kDisplay, kGameOver };
+  Phase phase = Phase::kRunning;
+  int wave = 1;
+  int lives = config_.scenario.game_lives;
+  std::uint64_t wire_tick = 0;   // Monotonic across ALL waves (delta/ack safe).
+  std::uint64_t cadence = 0;
+  std::uint64_t phase_ticks = 0;
+  std::uint64_t round_ticks = 0;
+  std::size_t seen_results = 0, seen_rockets = 0, seen_track_events = 0;
+  bool target_resolved_sent = false;  // Suppress duplicate kill/leak events.
+  bool announce_round = true;         // Emit kRoundStart for the live wave.
+
+  std::optional<sim::World> world;
+  world.emplace(make_cfg(wave));
+  auto next_tick_at = steady_clock::now();
+
+  while (sim_running_.load()) {
+    const auto work_started = steady_clock::now();
+    SimOutput output;
+    const auto step_tick = static_cast<std::uint32_t>(wire_tick);
+
+    if (announce_round) {
+      announce_round = false;
+      SS_LOG_INFO("game: wave %d begins (lives %d)", wave, lives);
+      protocol::EngagementEvent ev;
+      ev.tick = step_tick;
+      ev.kind = protocol::EventKind::kRoundStart;
+      ev.subject_id = static_cast<std::uint16_t>(wave);
+      output.events.push_back(ev);
+    }
+
+    // 1. Operator commands into the live wave (no journaling here).
+    SimCommand command;
+    while (net_to_sim_.pop(command)) {
+      if (phase != Phase::kRunning) {
+        continue;  // No live target to shoot between waves.
+      }
+      sim::FireCommand fire = command.fire;
+      if (command.track_id != 0) {
+        const auto solution = world->solve_for_track(command.track_id);
+        if (!solution.has_value()) {
+          stats_.track_solution_failures.fetch_add(1);
+          continue;
+        }
+        fire.azimuth_rad = solution->azimuth_rad + command.fire.azimuth_rad;
+        fire.elevation_rad = solution->elevation_rad + command.fire.elevation_rad;
+      }
+      world->queue_fire(fire);
+    }
+
+    // 2. Advance while the wave is live or holding for its result VFX.
+    const bool stepping = phase == Phase::kRunning || phase == Phase::kDisplay;
+    if (stepping) {
+      world->step();
+      stats_.ticks.fetch_add(1);
+    }
+
+    // 3. Incremental events (launch / resolve / track lifecycle / kill).
+    const auto& rockets = world->rockets();
+    for (; seen_rockets < rockets.size(); ++seen_rockets) {
+      protocol::EngagementEvent ev;
+      ev.tick = step_tick;
+      ev.kind = protocol::EventKind::kLaunch;
+      ev.subject_id = static_cast<std::uint16_t>(rockets[seen_rockets].id);
+      output.events.push_back(ev);
+    }
+    const auto& results = world->results();
+    for (; seen_results < results.size(); ++seen_results) {
+      const sim::RocketResult& r = results[seen_results];
+      protocol::EngagementEvent ev;
+      ev.tick = step_tick;
+      ev.kind = protocol::EventKind::kRocketResolved;
+      ev.subject_id = static_cast<std::uint16_t>(r.rocket_id);
+      ev.miss_distance_m = static_cast<float>(r.miss_distance_m);
+      ev.detonated = r.detonated;
+      ev.killed = r.killed;
+      output.events.push_back(ev);
+    }
+    const auto& track_events = world->track_events();
+    for (; seen_track_events < track_events.size(); ++seen_track_events) {
+      const sim::TrackEvent& te = track_events[seen_track_events];
+      if (te.kind == sim::TrackEvent::Kind::kInitiated) {
+        continue;
+      }
+      protocol::EngagementEvent ev;
+      ev.tick = step_tick;
+      ev.kind = te.kind == sim::TrackEvent::Kind::kConfirmed ? protocol::EventKind::kTrackConfirmed
+                                                             : protocol::EventKind::kTrackLost;
+      ev.subject_id = static_cast<std::uint16_t>(te.track_id);
+      output.events.push_back(ev);
+    }
+    if (!target_resolved_sent && world->target().destroyed()) {
+      target_resolved_sent = true;  // A rocket killed it: WIN.
+      SS_LOG_INFO("game: wave %d target DESTROYED (kill)", wave);
+      protocol::EngagementEvent ev;
+      ev.tick = step_tick;
+      ev.kind = protocol::EventKind::kTargetDestroyed;
+      output.events.push_back(ev);
+    }
+
+    // 4. Resolution: kill (handled above), leak (target reached the ship), or
+    //    a timeout stalemate. Only while the wave is live.
+    if (phase == Phase::kRunning) {
+      ++round_ticks;
+      const math::Vec3& tp = world->target().position();
+      const double ground_range = std::sqrt(tp.x * tp.x + tp.y * tp.y);
+      if (world->target().destroyed()) {
+        phase = Phase::kDisplay;
+        phase_ticks = 0;
+      } else if (ground_range < kShipHitRangeM) {
+        lives -= 1;
+        if (!target_resolved_sent) {
+          target_resolved_sent = true;  // Suppress any kill credit for a leaker.
+          SS_LOG_INFO("game: wave %d target REACHED SHIP — lives now %d", wave, lives);
+          protocol::EngagementEvent ev;
+          ev.tick = step_tick;
+          ev.kind = protocol::EventKind::kTargetHitShip;
+          output.events.push_back(ev);
+        }
+        phase = Phase::kDisplay;
+        phase_ticks = 0;
+      } else if (round_ticks > kRoundTimeoutTicks) {
+        phase = Phase::kDisplay;  // Escape/stalemate — no life lost.
+        phase_ticks = 0;
+      }
+    }
+
+    // 5. Snapshot @30Hz while the world is visible.
+    if (stepping && cadence % 2 == 0) {
+      output.has_snapshot = true;
+      output.tick = static_cast<std::uint32_t>(wire_tick);
+      output.phase = protocol::EngagementPhase::kRunning;
+      append_world_snapshot(output, *world);
+    }
+    // 5b. Streamed fire solutions for confirmed tracks (PPI lock aid).
+    if (phase == Phase::kRunning && fire_solution_interval != 0 &&
+        cadence % fire_solution_interval == 0) {
+      for (const sim::Track& track : world->tracker().tracks()) {
+        if (track.status != sim::TrackStatus::kConfirmed) {
+          continue;
+        }
+        protocol::FireSolution fs;
+        fs.tick = static_cast<std::uint32_t>(wire_tick);
+        fs.track_id = static_cast<std::uint16_t>(track.id);
+        if (const auto sol = world->solve_for_track(track.id)) {
+          const math::Vec3 pip = track.position() + track.velocity() * sol->time_of_flight_s;
+          fs.valid = true;
+          fs.pip_x = pip.x;
+          fs.pip_y = pip.y;
+          fs.pip_z = pip.z;
+          fs.time_of_flight_s = static_cast<float>(sol->time_of_flight_s);
+          fs.dispersion_radius_m =
+              static_cast<float>(sim::FireCommand{}.dispersion_mrad * 1e-3 * pip.norm());
+        }
+        output.fire_solutions.push_back(fs);
+      }
+    }
+    ++cadence;
+    ++wire_tick;
+
+    // 6. Sub-phase transitions.
+    if (phase == Phase::kDisplay && ++phase_ticks >= kDisplayTicks) {
+      if (lives <= 0) {
+        SS_LOG_INFO("game: GAME OVER at wave %d", wave);
+        protocol::EngagementEvent ev;
+        ev.tick = static_cast<std::uint32_t>(wire_tick);
+        ev.kind = protocol::EventKind::kEngagementEnd;  // Final score card.
+        output.events.push_back(ev);
+        phase = Phase::kGameOver;
+      } else {
+        ++wave;
+        world.emplace(make_cfg(wave));
+        seen_results = seen_rockets = seen_track_events = 0;
+        target_resolved_sent = false;
+        round_ticks = 0;
+        phase = Phase::kRunning;
+        phase_ticks = 0;
+        announce_round = true;
+      }
+    }
+
+    // 7. Publish + wake the I/O thread.
+    if (output.has_snapshot || !output.events.empty() || !output.fire_solutions.empty()) {
+      if (sim_to_net_.push(std::move(output))) {
+        loop_->wakeup();
+      } else {
+        stats_.sim_output_dropped.fetch_add(1);
+      }
+    }
+
+    // 8. Tick accounting + fixed-rate pacing (mirrors the single-engagement loop).
+    const auto busy_us = static_cast<std::uint64_t>(
+        duration_cast<microseconds>(steady_clock::now() - work_started).count());
+    stats_.tick_busy_sum_us.fetch_add(busy_us);
+    stats_
+        .tick_busy_hist[std::min<std::size_t>(SimServerStats::kTickHistBuckets - 1,
+                                              std::bit_width(busy_us))]
+        .fetch_add(1);
+    if (busy_us > stats_.tick_busy_max_us.load()) {
+      stats_.tick_busy_max_us.store(busy_us);
+    }
+    if (busy_us > 8000) {
+      stats_.tick_busy_over_8ms.fetch_add(1);
+    }
+    next_tick_at += tick_period;
+    const auto now = steady_clock::now();
+    if (now < next_tick_at) {
+      std::this_thread::sleep_until(next_tick_at);
+    } else if (now - next_tick_at > 10 * tick_period) {
       next_tick_at = now;
     }
   }
