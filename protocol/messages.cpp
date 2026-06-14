@@ -12,7 +12,7 @@ bool valid_role(std::uint8_t v) { return v <= static_cast<std::uint8_t>(Role::kS
 bool valid_reject(std::uint8_t v) { return v <= static_cast<std::uint8_t>(RejectReason::kBadToken); }
 bool valid_entity_kind(std::uint8_t v) { return v <= static_cast<std::uint8_t>(EntityKind::kTrack); }
 bool valid_event_kind(std::uint8_t v) {
-  return v <= static_cast<std::uint8_t>(EventKind::kTrackLost);
+  return v <= static_cast<std::uint8_t>(EventKind::kRoundStart);
 }
 bool valid_phase(std::uint8_t v) { return v <= static_cast<std::uint8_t>(EngagementPhase::kEnded); }
 

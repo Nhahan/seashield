@@ -88,6 +88,13 @@ enum class EventKind : std::uint8_t {
   // the reliable channel (charter §4.3 채널 배정 철학).
   kTrackConfirmed = 4,
   kTrackLost = 5,
+  // Survival game mode (P7 pl=playable track). subject_id carries the wave
+  // index for kRoundStart and is 0 for kTargetHitShip. Both ride the same
+  // reliable channel as the other adjudication events; the console derives
+  // score/lives/wave from the (kTargetDestroyed, kTargetHitShip, kRoundStart)
+  // event stream — no separate scoreboard message is needed.
+  kTargetHitShip = 6,  // A live target reached the ship: the operator lost a life.
+  kRoundStart = 7,     // A new wave began; subject_id = wave number (1-based).
 };
 
 enum class EngagementPhase : std::uint8_t {

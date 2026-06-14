@@ -427,9 +427,22 @@ TEST(MessagesTest, V2GuardsAcceptNewEnumsAndRejectTheNextOnes) {
   Reader r2(w2.data());
   EXPECT_FALSE(EntityRecord::decode(r2).has_value());
 
+  // Game-mode event kinds (kTargetHitShip=6, kRoundStart=7) are valid; the
+  // first value past the catalogue (8) is rejected.
+  for (const std::uint8_t kind : {std::uint8_t{6}, std::uint8_t{7}}) {
+    Writer wok;
+    wok.u32(1);
+    wok.u8(kind);
+    wok.u16(0);
+    wok.f32(0.0F);
+    wok.u8(0);
+    wok.u8(0);
+    EXPECT_TRUE(decode_data_message(MsgType::kEngagementEvent, wok.data()).has_value());
+  }
+
   Writer w3;
   w3.u32(1);
-  w3.u8(6);  // One past kTrackLost.
+  w3.u8(8);  // One past kRoundStart.
   w3.u16(0);
   w3.f32(0.0F);
   w3.u8(0);
