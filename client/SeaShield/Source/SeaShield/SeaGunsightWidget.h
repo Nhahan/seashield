@@ -79,6 +79,21 @@ public:
 	// 0..1 pulse for attention-getting elements (threat box, SOLUTION cue).
 	float Pulse() const { return 0.5f + 0.5f * FMath::Sin(PulsePhaseS * 6.2831853f); }
 
+	// Brief "X KILL" marks at a destroyed target's last position (world-anchored,
+	// fade ~1.6 s) — the gun-sight half of the kill feedback.
+	struct FKillMark
+	{
+		FVector2D Local = FVector2D::ZeroVector;
+		bool bOnScreen = false;
+		float AgeS = 0.0f;
+	};
+	const TArray<FKillMark>& KillMarks() const { return CachedKillMarks; }
+
+protected:
+	virtual void NativeOnInitialized() override;
+
+public:
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SeaShield")
 	FLinearColor ReticleColor = FLinearColor(0.55f, 1.0f, 0.62f, 0.9f);
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SeaShield")
@@ -95,6 +110,18 @@ protected:
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
 
 private:
+	UFUNCTION()
+	void HandleKillEvent(const FSeaEngagementEvent& Event);
+
+	struct FKillWorld
+	{
+		FVector WorldCm = FVector::ZeroVector;
+		float AgeS = 0.0f;
+	};
+	TArray<FKillWorld> KillWorld;            // world-anchored, aged in NativeTick
+	TArray<FKillMark> CachedKillMarks;       // projected, for the painter
+	TMap<int32, FVector> LastTargetWorldCm;  // last seen target world pos by id
+
 	TArray<FMarker> CachedMarkers;
 	FAimPoint Impact;
 	FAimPoint Lead;

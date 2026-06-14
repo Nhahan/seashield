@@ -68,12 +68,17 @@ inline FVector RocketAccel(const FVector& Pos, const FVector& Vel, double AgeS,
 
 // Integrate the bore trajectory (RK4), calling Visit(pos, age) each step until
 // it returns to the sea or hits the flight ceiling. Returns true if it splashed.
+// ShipPosEnu / ShipVelEnu describe the launch platform: the bore starts on the
+// ship's deck and the rocket inherits the ship's velocity. The defaults (origin,
+// no motion) reproduce the original fixed-platform aid bit-for-bit.
 inline bool IntegrateBore(double AzimuthDeg, double ElevationDeg, const FVector& WindEnu,
-                          const TFunctionRef<void(const FVector&, double)> Visit)
+                          const TFunctionRef<void(const FVector&, double)> Visit,
+                          const FVector& ShipPosEnu = FVector::ZeroVector,
+                          const FVector& ShipVelEnu = FVector::ZeroVector)
 {
 	const FVector LaunchDir = BoreDirEnu(AzimuthDeg, ElevationDeg);
-	FVector Pos(0.0, 0.0, kLaunchUpM);
-	FVector Vel = LaunchDir * kRailExitMps;
+	FVector Pos = ShipPosEnu + FVector(0.0, 0.0, kLaunchUpM);
+	FVector Vel = LaunchDir * kRailExitMps + ShipVelEnu;
 	double Age = 0.0;
 	auto A = [&](const FVector& P, const FVector& V, double T)
 	{ return RocketAccel(P, V, T, WindEnu, LaunchDir); };
@@ -110,10 +115,12 @@ struct FImpact
 	bool bValid = false;
 };
 
-inline FImpact PredictImpact(double AzimuthDeg, double ElevationDeg, const FVector& WindEnu)
+inline FImpact PredictImpact(double AzimuthDeg, double ElevationDeg, const FVector& WindEnu,
+                             const FVector& ShipPosEnu = FVector::ZeroVector,
+                             const FVector& ShipVelEnu = FVector::ZeroVector)
 {
 	FImpact Out;
-	FVector Prev(0, 0, kLaunchUpM);
+	FVector Prev = ShipPosEnu + FVector(0.0, 0.0, kLaunchUpM);
 	double PrevAge = 0.0;
 	bool bDone = false;
 	IntegrateBore(AzimuthDeg, ElevationDeg, WindEnu,
@@ -131,7 +138,7 @@ inline FImpact PredictImpact(double AzimuthDeg, double ElevationDeg, const FVect
 		              }
 		              Prev = P;
 		              PrevAge = Age;
-	              });
+	              }, ShipPosEnu, ShipVelEnu);
 	return Out;
 }
 
@@ -150,7 +157,9 @@ struct FFireAid
 };
 
 inline FFireAid ComputeFireAid(double AzimuthDeg, double ElevationDeg, const FVector& WindEnu,
-                               const FVector& TargetPosEnu, const FVector& TargetVelEnu)
+                               const FVector& TargetPosEnu, const FVector& TargetVelEnu,
+                               const FVector& ShipPosEnu = FVector::ZeroVector,
+                               const FVector& ShipVelEnu = FVector::ZeroVector)
 {
 	FFireAid Out;
 	double BestMiss = 1e30;
@@ -172,7 +181,7 @@ inline FFireAid ComputeFireAid(double AzimuthDeg, double ElevationDeg, const FVe
 			              Out.MissM = static_cast<float>(D);
 			              Out.bValid = true;
 		              }
-	              });
+	              }, ShipPosEnu, ShipVelEnu);
 	return Out;
 }
 
@@ -188,15 +197,20 @@ struct FAimSolution
 };
 
 inline FAimSolution SolveAim(const FVector& WindEnu, const FVector& TargetPosEnu,
-                             const FVector& TargetVelEnu)
+                             const FVector& TargetVelEnu,
+                             const FVector& ShipPosEnu = FVector::ZeroVector,
+                             const FVector& ShipVelEnu = FVector::ZeroVector)
 {
 	FAimSolution Best;
-	const double CenterAz = FMath::RadiansToDegrees(FMath::Atan2(TargetPosEnu.X, TargetPosEnu.Y));
+	// Search around the bearing from the SHIP to the target, not the origin.
+	const double CenterAz = FMath::RadiansToDegrees(
+	    FMath::Atan2(TargetPosEnu.X - ShipPosEnu.X, TargetPosEnu.Y - ShipPosEnu.Y));
 	for (double Az = CenterAz - 25.0; Az <= CenterAz + 25.0; Az += 1.5)
 	{
 		for (double El = 4.0; El <= 70.0; El += 1.5)
 		{
-			const FFireAid Aid = ComputeFireAid(Az, El, WindEnu, TargetPosEnu, TargetVelEnu);
+			const FFireAid Aid =
+			    ComputeFireAid(Az, El, WindEnu, TargetPosEnu, TargetVelEnu, ShipPosEnu, ShipVelEnu);
 			if (Aid.bValid && Aid.MissM < Best.MissM)
 			{
 				Best.MissM = Aid.MissM;

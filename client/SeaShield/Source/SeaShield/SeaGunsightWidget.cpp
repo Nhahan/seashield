@@ -143,6 +143,22 @@ public:
 			      FString::Printf(TEXT("%.1f KM"), M.RangeM / 1000.0f), RangeFont, C);
 		}
 
+		// Kill marks: a fading red "X KILL" at each recent kill location.
+		for (const USeaGunsightWidget::FKillMark& K : Data->KillMarks())
+		{
+			if (!K.bOnScreen)
+			{
+				continue;
+			}
+			const float A = FMath::Clamp(1.0f - K.AgeS / 1.6f, 0.0f, 1.0f);
+			const FLinearColor KC(0.4f, 1.0f, 0.5f, A);  // green = a confirmed splash
+			const float r = 13.0f;
+			OutLine(Out, Layer + 2, Geo, K.Local + FVector2D(-r, -r), K.Local + FVector2D(r, r), KC, 2.6f);
+			OutLine(Out, Layer + 2, Geo, K.Local + FVector2D(-r, r), K.Local + FVector2D(r, -r), KC, 2.6f);
+			Label(Out, Layer + 2, Geometry, FVector2D(K.Local.X + r + 4, K.Local.Y - 8),
+			      FVector2D(70, 16), TEXT("KILL"), Font, KC);
+		}
+
 		// --- Fire-control aim aids ---------------------------------------------
 		const USeaGunsightWidget::FAimPoint LeadPt = Data->LeadPoint();
 		const USeaGunsightWidget::FAimPoint ImpactPt = Data->ImpactPoint();
@@ -347,11 +363,41 @@ TSharedRef<SWidget> USeaGunsightWidget::RebuildWidget()
 	return Super::RebuildWidget();
 }
 
+void USeaGunsightWidget::NativeOnInitialized()
+{
+	Super::NativeOnInitialized();
+	if (const UGameInstance* GI = GetGameInstance())
+	{
+		if (USeaNetSubsystem* Net = GI->GetSubsystem<USeaNetSubsystem>())
+		{
+			Net->OnEngagementEvent.AddDynamic(this, &USeaGunsightWidget::HandleKillEvent);
+		}
+	}
+}
+
+void USeaGunsightWidget::HandleKillEvent(const FSeaEngagementEvent& Event)
+{
+	if (Event.Kind == 7)  // kRoundStart — drop the previous wave's kill marks.
+	{
+		KillWorld.Reset();
+		LastTargetWorldCm.Reset();
+		return;
+	}
+	if (Event.Kind == 2)  // kTargetDestroyed — mark the kill at the target's last pos.
+	{
+		if (const FVector* W = LastTargetWorldCm.Find(Event.SubjectId))
+		{
+			KillWorld.Add({*W, 0.0f});
+		}
+	}
+}
+
 void USeaGunsightWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
 	PulsePhaseS += InDeltaTime;
 	CachedMarkers.Reset();
+	CachedKillMarks.Reset();
 
 	APlayerController* PC = GetOwningPlayer();
 	USeaNetSubsystem* Net = nullptr;
@@ -436,6 +482,7 @@ void USeaGunsightWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTi
 			TargetVelUeCm = E.Velocity;
 		}
 		const FVector World = E.Position + SeaWorldFrame::Origin;
+		LastTargetWorldCm.Add(E.Id, World);  // remembered so a kill can mark the spot
 		FVector2D Screen;
 		// Only mark targets in front of the camera and on screen.
 		if (!PC->ProjectWorldLocationToScreen(World, Screen, /*bPlayerViewportRelative=*/false))
@@ -450,6 +497,28 @@ void USeaGunsightWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTi
 		CachedMarkers.Add(M);
 	}
 
+	// Age + project the world-anchored kill marks (brief "X KILL", ~1.6 s).
+	for (int32 i = 0; i < KillWorld.Num();)
+	{
+		KillWorld[i].AgeS += InDeltaTime;
+		if (KillWorld[i].AgeS > 1.6f)
+		{
+			KillWorld.RemoveAt(i);
+			continue;
+		}
+		FVector2D Screen;
+		FKillMark KM;
+		KM.AgeS = KillWorld[i].AgeS;
+		KM.bOnScreen =
+		    PC->ProjectWorldLocationToScreen(KillWorld[i].WorldCm, Screen, /*viewportRel=*/false);
+		if (KM.bOnScreen)
+		{
+			KM.Local = FVector2D(Screen.X / DpiScale, Screen.Y / DpiScale);
+		}
+		CachedKillMarks.Add(KM);
+		++i;
+	}
+
 	// --- Fire-control aim aids -------------------------------------------------
 	Impact = FAimPoint{};
 	Lead = FAimPoint{};
@@ -462,6 +531,18 @@ void USeaGunsightWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTi
 		// Steady mean wind in ENU m/s (the gust is unknowable to the aim).
 		const FVector WindCms = Net->GetWeather().WindCms;
 		const FVector WindEnu(WindCms.Y / 100.0, WindCms.X / 100.0, WindCms.Z / 100.0);
+		// Launch platform pose: the bore starts on the ship and inherits its
+		// velocity, so the pipper/lead stay honest while the player maneuvers.
+		FVector ShipPosEnu = FVector::ZeroVector;
+		FVector ShipVelEnu = FVector::ZeroVector;
+		FSeaEntityState ShipState;
+		if (Net->GetOwnShip(ShipState))
+		{
+			ShipPosEnu = FVector(ShipState.Position.Y / 100.0, ShipState.Position.X / 100.0,
+			                     ShipState.Position.Z / 100.0);
+			ShipVelEnu = FVector(ShipState.Velocity.Y / 100.0, ShipState.Velocity.X / 100.0,
+			                     ShipState.Velocity.Z / 100.0);
+		}
 		const double Az = Gunner->AimAzimuthDeg();
 		const double El = Gunner->AimElevationDeg();
 		FVector2D L;
@@ -474,7 +555,7 @@ void USeaGunsightWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTi
 			const FVector TVelEnu(TargetVelUeCm.Y / 100.0, TargetVelUeCm.X / 100.0,
 			                      TargetVelUeCm.Z / 100.0);
 			const SeaBallistics::FFireAid Aid =
-			    SeaBallistics::ComputeFireAid(Az, El, WindEnu, TPosEnu, TVelEnu);
+			    SeaBallistics::ComputeFireAid(Az, El, WindEnu, TPosEnu, TVelEnu, ShipPosEnu, ShipVelEnu);
 			if (Aid.bValid)
 			{
 				Impact.bValid = true;
@@ -496,7 +577,7 @@ void USeaGunsightWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTi
 		else
 		{
 			// No threat up: still show where the bore's salvo would splash.
-			const SeaBallistics::FImpact Pred = SeaBallistics::PredictImpact(Az, El, WindEnu);
+			const SeaBallistics::FImpact Pred = SeaBallistics::PredictImpact(Az, El, WindEnu, ShipPosEnu, ShipVelEnu);
 			if (Pred.bValid)
 			{
 				Impact.bValid = true;
