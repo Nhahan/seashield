@@ -47,6 +47,13 @@ bool valid_fire_offsets(const protocol::FireRequest& fire) {
          fire.launch_interval_s <= 1.0;
 }
 
+// Steering set-points: finite and within the held-control range. Out-of-range
+// is an application error (broken UI), rejected without killing the console.
+bool valid_ship_command(const protocol::ShipCommand& steer) {
+  return std::isfinite(steer.rudder) && std::isfinite(steer.throttle) && steer.rudder >= -1.0 &&
+         steer.rudder <= 1.0 && steer.throttle >= 0.0 && steer.throttle <= 1.0;
+}
+
 std::uint64_t random_seed() {
   std::random_device rd;
   return (static_cast<std::uint64_t>(rd()) << 32) | rd();
@@ -464,6 +471,8 @@ void SimServer::on_frame(net::TcpSession& transport, std::span<const std::uint8_
     handle_hello(transport, *hello);
   } else if (const auto* fire = std::get_if<protocol::FireRequest>(&*message)) {
     handle_fire(transport, *fire);
+  } else if (const auto* steer = std::get_if<protocol::ShipCommand>(&*message)) {
+    handle_steer(transport, *steer);
   } else {
     // Welcome/Reject are server-to-client only.
     transport.close("protocol violation: unexpected control message");
@@ -605,6 +614,7 @@ void SimServer::handle_fire(net::TcpSession& transport, const protocol::FireRequ
     return;
   }
   SimCommand command;
+  command.kind = SimCommand::Kind::kFire;
   command.track_id = fire.track_id;
   command.fire.azimuth_rad = fire.azimuth_rad;
   command.fire.elevation_rad = fire.elevation_rad;
@@ -613,6 +623,34 @@ void SimServer::handle_fire(net::TcpSession& transport, const protocol::FireRequ
   command.fire.launch_interval_s = fire.launch_interval_s;
   if (!net_to_sim_.push(std::move(command))) {
     stats_.commands_rejected.fetch_add(1);  // Ring full: operator can resend.
+    return;
+  }
+  stats_.commands_accepted.fetch_add(1);
+}
+
+void SimServer::handle_steer(net::TcpSession& transport, const protocol::ShipCommand& steer) {
+  const auto attachment = attachments_.find(transport.id());
+  if (attachment == attachments_.end()) {
+    transport.close("protocol violation: steer before hello");
+    return;
+  }
+  const LogicalSession& session = sessions_.at(attachment->second);
+  if (replay_journal_.has_value()) {
+    stats_.commands_rejected.fetch_add(1);  // The journal drives the helm in replay.
+    return;
+  }
+  const bool may_steer =
+      session.role == protocol::Role::kWeapons || session.role == protocol::Role::kSolo;
+  if (!may_steer || !valid_ship_command(steer)) {
+    stats_.commands_rejected.fetch_add(1);
+    return;
+  }
+  SimCommand command;
+  command.kind = SimCommand::Kind::kSteer;
+  command.steer.rudder = steer.rudder;
+  command.steer.throttle = steer.throttle;
+  if (!net_to_sim_.push(std::move(command))) {
+    stats_.commands_rejected.fetch_add(1);  // Ring full: the next set-point resends.
     return;
   }
   stats_.commands_accepted.fetch_add(1);
@@ -755,12 +793,22 @@ void SimServer::sim_thread_main() {
     if (replay_journal_.has_value()) {
       while (replay_cursor < replay_journal_->entries().size() &&
              replay_journal_->entries()[replay_cursor].tick == world.tick()) {
-        world.queue_fire(replay_journal_->entries()[replay_cursor].command);
+        const sim::JournalEntry& entry = replay_journal_->entries()[replay_cursor];
+        if (entry.kind == sim::JournalEntry::Kind::kSteer) {
+          world.queue_steer(entry.steer);
+        } else {
+          world.queue_fire(entry.command);
+        }
         ++replay_cursor;
       }
     }
     SimCommand command;
     while (net_to_sim_.pop(command)) {
+      if (command.kind == SimCommand::Kind::kSteer) {
+        journal_.record_steer(world.tick(), command.steer);
+        world.queue_steer(command.steer);
+        continue;
+      }
       sim::FireCommand fire = command.fire;
       if (command.track_id != 0) {
         // Resolve the designated track HERE: the tracker belongs to this
@@ -940,19 +988,42 @@ void SimServer::sim_thread_main() {
 }
 
 void SimServer::append_world_snapshot(SimOutput& output, const sim::World& world) const {
-  protocol::EntityRecord target_record;
-  target_record.id = 0;
-  target_record.kind = protocol::EntityKind::kTarget;
-  target_record.state = world.target().destroyed() ? 1 : 0;
-  const math::Vec3& target_pos = world.target().position();
-  const math::Vec3 target_vel = world.target().velocity();
-  target_record.pos_x = target_pos.x;
-  target_record.pos_y = target_pos.y;
-  target_record.pos_z = target_pos.z;
-  target_record.vel_x = target_vel.x;
-  target_record.vel_y = target_vel.y;
-  target_record.vel_z = target_vel.z;
-  output.entities.push_back(target_record);
+  // Own ship (id 0): the player's platform pose. Velocity carries the course;
+  // the client derives the hull's heading from it (the camera aim is
+  // world-referenced and independent). A fixed platform reports the origin.
+  {
+    protocol::EntityRecord ship_record;
+    ship_record.id = 0;
+    ship_record.kind = protocol::EntityKind::kOwnShip;
+    const math::Vec3 ship_pos = world.ship_position();
+    const math::Vec3 ship_vel = world.ship_velocity();
+    ship_record.pos_x = ship_pos.x;
+    ship_record.pos_y = ship_pos.y;
+    ship_record.pos_z = ship_pos.z;
+    ship_record.vel_x = ship_vel.x;
+    ship_record.vel_y = ship_vel.y;
+    ship_record.vel_z = ship_vel.z;
+    output.entities.push_back(ship_record);
+  }
+  // All concurrent targets, ids 0..N-1 (single-engagement = just id 0). The
+  // client keys actors by (kind<<16|id), so multiple targets render directly.
+  const auto& targets = world.targets();
+  for (std::size_t i = 0; i < targets.size(); ++i) {
+    const sim::Target& tgt = targets[i];
+    protocol::EntityRecord target_record;
+    target_record.id = static_cast<std::uint16_t>(i);
+    target_record.kind = protocol::EntityKind::kTarget;
+    target_record.state = tgt.destroyed() ? 1 : 0;
+    const math::Vec3& target_pos = tgt.position();
+    const math::Vec3 target_vel = tgt.velocity();
+    target_record.pos_x = target_pos.x;
+    target_record.pos_y = target_pos.y;
+    target_record.pos_z = target_pos.z;
+    target_record.vel_x = target_vel.x;
+    target_record.vel_y = target_vel.y;
+    target_record.vel_z = target_vel.z;
+    output.entities.push_back(target_record);
+  }
   for (const sim::Rocket& rocket : world.rockets()) {
     if (!rocket.alive) {
       continue;  // Resolved rockets live on as events, not entities.
@@ -996,7 +1067,11 @@ void SimServer::game_thread_main() {
   // monotonic WIRE tick) lives here. No journaling: deterministic replay is the
   // single-engagement path's job (charter §5.8).
   const auto tick_period = nanoseconds(16'666'667);  // 1/60 s.
-  constexpr double kShipHitRangeM = 250.0;  // A live target this close = a leak.
+  // A live target within this range of the ship = a leak. Sized so a hard
+  // maneuver CAN push a turn-rate-limited ASM's closest approach outside it
+  // (the dodge); a missile homing a stationary ship still strikes dead-on, so
+  // not maneuvering is unchanged. (P7+ — was 250 m for the fixed platform.)
+  constexpr double kShipHitRangeM = 140.0;
   const auto kDisplayTicks = static_cast<std::uint64_t>(2.0 * sim::kTickRateHz);  // VFX hold.
   const auto kRoundTimeoutTicks = static_cast<std::uint64_t>(45.0 * sim::kTickRateHz);
   const std::uint64_t fire_solution_interval =
@@ -1006,41 +1081,67 @@ void SimServer::game_thread_main() {
                        sim::kTickRateHz / config_.scenario.fire_solution_rate_hz + 0.5))
           : 0;
 
-  // Per-wave world config: reseed the RNG streams + weather and roll a fresh
-  // inbound ASM (bearing/range/altitude/speed) so no two waves play the same.
+  // Per-wave world config: reseed the RNG streams + weather and roll K inbound
+  // ASMs (count grows with the wave) so each wave is a fresh, escalating
+  // multi-target raid. Each ASM drives AT the ship with a small course offset;
+  // the terminal phase homes on the ship so an unengaged target reliably hits.
   auto make_cfg = [&](int wave) -> sim::WorldConfig {
     sim::WorldConfig cfg = config_.scenario.config;
     const std::uint64_t spread =
         static_cast<std::uint64_t>(wave) * config_.scenario.game_seed_stride;
     cfg.sim_seed = config_.scenario.config.sim_seed + spread;
     cfg.gust_seed = config_.scenario.config.gust_seed + spread + 0x1234ULL;
-    cfg.weather =
-        sim::WeatherGenerator::generate(config_.scenario.weather_seed + static_cast<std::uint64_t>(wave));
+    cfg.weather = sim::WeatherGenerator::generate(config_.scenario.weather_seed +
+                                                  static_cast<std::uint64_t>(wave));
+    // Own ship: a maneuverable frigate. The player steers it (A/D rudder, W/S
+    // throttle) to slip the terminal homing of an unengaged ASM — the dodge.
+    cfg.ship.initial_position = {0.0, 0.0, 0.0};
+    cfg.ship.heading_rad = 0.0;
+    cfg.ship.speed_mps = 0.0;
+    cfg.ship.max_speed_mps = 20.0;  // ~39 kn flank.
+    cfg.ship.accel_mps2 = 2.0;
+    cfg.ship.turn_rate_max_rad_s = math::deg_to_rad(10.0);  // Hard-over rate.
     Pcg32 rng(config_.scenario.weather_seed + 0x9E3779B97F4A7C15ULL,
               static_cast<std::uint64_t>(wave) + 1);
-    const double bearing = rng.next_double() * math::kTwoPi;
-    const double range_m = 4500.0 + rng.next_double() * 3500.0;  // 4.5–8 km out.
-    const double alt_m = 150.0 + rng.next_double() * 700.0;      // 150–850 m.
-    const double east = range_m * math::sin(bearing);
-    const double north = range_m * math::cos(bearing);
-    cfg.target.initial_position = {east, north, alt_m};
-    // Drive it AT the ship: small course offset only, and the terminal phase
-    // homes onto the origin — so an unengaged target reliably hits (stakes are
-    // real, rounds resolve). Difficulty ramps with the wave.
-    const double inbound = math::atan2(-east, -north);
-    const double offset_deg = 8.0;
-    cfg.target.heading_rad = inbound + (rng.next_double() - 0.5) * math::deg_to_rad(offset_deg);
     const double ramp = static_cast<double>(std::min(wave - 1, 8));  // 0..8 over waves.
-    cfg.target.speed_mps = 170.0 + 0.5 * ramp * 30.0 + rng.next_double() * 90.0;  // ~170–340.
-    cfg.target.turn_rate_rad_s = 0.0;
-    // A credible ASM: cruise in, pop up near the ship and dive onto it. Weave
-    // grows with the wave so early waves are catchable and later ones force you
-    // to read the maneuver (the whole point of unguided gunnery).
-    cfg.target.popup_range_m = 3000.0 + rng.next_double() * 1000.0;
-    cfg.target.popup_altitude_m = 240.0;
-    cfg.target.weave_range_m = wave <= 1 ? 0.0 : (2500.0 + rng.next_double() * 1500.0);
-    cfg.target.weave_turn_rate_rad_s = math::deg_to_rad(4.0 + ramp * 1.2 + rng.next_double() * 4.0);
-    cfg.target.weave_period_s = 3.0 + rng.next_double() * 3.0;
+    const int count = std::min(1 + wave / 2, 5);  // 1,2,2,3,3,4,4,5,5 by wave
+    auto roll_target = [&](Pcg32& r) -> sim::TargetParams {
+      sim::TargetParams t = config_.scenario.config.target;
+      const double bearing = r.next_double() * math::kTwoPi;
+      const double range_m = 4500.0 + r.next_double() * 3500.0;  // 4.5–8 km out.
+      const double alt_m = 150.0 + r.next_double() * 700.0;      // 150–850 m.
+      const double east = range_m * math::sin(bearing);
+      const double north = range_m * math::cos(bearing);
+      t.initial_position = {east, north, alt_m};
+      // Cruise dead at the ship's launch point (no jitter): a stationary ship is
+      // struck dead-on, but a ship that maneuvers clear before the late terminal
+      // pop-up leaves the capped homing unable to recover — the dodge.
+      const double inbound = math::atan2(-east, -north);
+      t.heading_rad = inbound;
+      t.speed_mps = 170.0 + 0.5 * ramp * 30.0 + r.next_double() * 90.0;  // ~170–340.
+      t.turn_rate_rad_s = 0.0;
+      // Cruise in, pop up near the ship and dive; weave grows with the wave so
+      // early raids are catchable and later ones force you to read the maneuver.
+      // Late terminal pop-up: the ASM sea-skims dead at the ship's launch point,
+      // then pops up and homes only inside ~1 km. A stationary ship is already
+      // under the aim → struck; a ship that broke beam-on has opened an offset
+      // the capped terminal turn cannot recover in the short dive — the dodge.
+      t.popup_range_m = 700.0 + r.next_double() * 300.0;
+      t.popup_altitude_m = 240.0;
+      t.weave_range_m = wave <= 1 ? 0.0 : (2500.0 + r.next_double() * 1500.0);
+      t.weave_turn_rate_rad_s = math::deg_to_rad(4.0 + ramp * 1.2 + r.next_double() * 4.0);
+      t.weave_period_s = 3.0 + r.next_double() * 3.0;
+      // Terminal turn-rate cap: finite, so a committed own-ship maneuver outruns
+      // the homing and forces an overshoot (the dodge). Low enough that a hard
+      // turn beats it; grows with the wave so later ASMs are harder to slip.
+      t.terminal_turn_rate_max_rad_s = math::deg_to_rad(3.5 + ramp * 0.4);
+      return t;
+    };
+    cfg.target = roll_target(rng);
+    cfg.additional_targets.clear();
+    for (int j = 1; j < count; ++j) {
+      cfg.additional_targets.push_back(roll_target(rng));
+    }
     return cfg;
   };
 
@@ -1053,11 +1154,12 @@ void SimServer::game_thread_main() {
   std::uint64_t phase_ticks = 0;
   std::uint64_t round_ticks = 0;
   std::size_t seen_results = 0, seen_rockets = 0, seen_track_events = 0;
-  bool target_resolved_sent = false;  // Suppress duplicate kill/leak events.
-  bool announce_round = true;         // Emit kRoundStart for the live wave.
+  std::vector<char> resolved;  // per-target: kill/leak already counted+signalled
+  bool announce_round = true;  // Emit kRoundStart for the live wave.
 
   std::optional<sim::World> world;
   world.emplace(make_cfg(wave));
+  resolved.assign(world->targets().size(), 0);
   auto next_tick_at = steady_clock::now();
 
   while (sim_running_.load()) {
@@ -1075,9 +1177,14 @@ void SimServer::game_thread_main() {
       output.events.push_back(ev);
     }
 
-    // 1. Operator commands into the live wave (no journaling here).
+    // 1. Operator commands into the live wave (no journaling here — game mode
+    //    reseeds per wave, so replay is the single-engagement path's job).
     SimCommand command;
     while (net_to_sim_.pop(command)) {
+      if (command.kind == SimCommand::Kind::kSteer) {
+        world->queue_steer(command.steer);  // Helm responds in any phase.
+        continue;
+      }
       if (phase != Phase::kRunning) {
         continue;  // No live target to shoot between waves.
       }
@@ -1135,38 +1242,59 @@ void SimServer::game_thread_main() {
       ev.subject_id = static_cast<std::uint16_t>(te.track_id);
       output.events.push_back(ev);
     }
-    if (!target_resolved_sent && world->target().destroyed()) {
-      target_resolved_sent = true;  // A rocket killed it: WIN.
-      SS_LOG_INFO("game: wave %d target DESTROYED (kill)", wave);
-      protocol::EngagementEvent ev;
-      ev.tick = step_tick;
-      ev.kind = protocol::EventKind::kTargetDestroyed;
-      output.events.push_back(ev);
-    }
-
-    // 4. Resolution: kill (handled above), leak (target reached the ship), or
-    //    a timeout stalemate. Only while the wave is live.
-    if (phase == Phase::kRunning) {
-      ++round_ticks;
-      const math::Vec3& tp = world->target().position();
-      const double ground_range = std::sqrt(tp.x * tp.x + tp.y * tp.y);
-      if (world->target().destroyed()) {
-        phase = Phase::kDisplay;
-        phase_ticks = 0;
-      } else if (ground_range < kShipHitRangeM) {
-        lives -= 1;
-        if (!target_resolved_sent) {
-          target_resolved_sent = true;  // Suppress any kill credit for a leaker.
-          SS_LOG_INFO("game: wave %d target REACHED SHIP — lives now %d", wave, lives);
+    // 3b. Per-target KILLS (any time the world is stepping — a rocket can kill
+    //     during the result-hold too). subject_id = target id.
+    {
+      const auto& tgts = world->targets();
+      for (std::size_t i = 0; i < tgts.size(); ++i) {
+        if (resolved[i] == 0 && tgts[i].destroyed()) {
+          resolved[i] = 1;
+          SS_LOG_INFO("game: wave %d target %zu DESTROYED (kill)", wave, i);
           protocol::EngagementEvent ev;
           ev.tick = step_tick;
-          ev.kind = protocol::EventKind::kTargetHitShip;
+          ev.kind = protocol::EventKind::kTargetDestroyed;
+          ev.subject_id = static_cast<std::uint16_t>(i);
           output.events.push_back(ev);
         }
+      }
+    }
+
+    // 4. Resolution: per-target leak (reached the ship, costs a life), then the
+    //    wave ends once ALL targets are resolved (killed or leaked) or it times
+    //    out. Leaks only count while the wave is live.
+    if (phase == Phase::kRunning) {
+      ++round_ticks;
+      const auto& tgts = world->targets();
+      for (std::size_t i = 0; i < tgts.size(); ++i) {
+        if (resolved[i] != 0) {
+          continue;
+        }
+        const math::Vec3& tp = tgts[i].position();
+        const math::Vec3 sp = world->ship_position();
+        const double leak_dx = tp.x - sp.x;
+        const double leak_dy = tp.y - sp.y;
+        if (std::sqrt(leak_dx * leak_dx + leak_dy * leak_dy) < kShipHitRangeM) {
+          // Always resolve so the wave can progress; only an ARMED enemy attack
+          // costs a life and signals the hit. With enemy attack off the ship is
+          // invulnerable — the target simply slips past (endless run).
+          resolved[i] = 1;
+          if (config_.scenario.game_enemy_attack) {
+            lives -= 1;
+            SS_LOG_INFO("game: wave %d target %zu REACHED SHIP — lives now %d", wave, i, lives);
+            protocol::EngagementEvent ev;
+            ev.tick = step_tick;
+            ev.kind = protocol::EventKind::kTargetHitShip;
+            ev.subject_id = static_cast<std::uint16_t>(i);
+            output.events.push_back(ev);
+          } else {
+            SS_LOG_INFO("game: wave %d target %zu slipped past (enemy attack off)", wave, i);
+          }
+        }
+      }
+      const bool all_resolved =
+          std::all_of(resolved.begin(), resolved.end(), [](char c) { return c != 0; });
+      if (all_resolved || round_ticks > kRoundTimeoutTicks) {
         phase = Phase::kDisplay;
-        phase_ticks = 0;
-      } else if (round_ticks > kRoundTimeoutTicks) {
-        phase = Phase::kDisplay;  // Escape/stalemate — no life lost.
         phase_ticks = 0;
       }
     }
@@ -1216,8 +1344,8 @@ void SimServer::game_thread_main() {
       } else {
         ++wave;
         world.emplace(make_cfg(wave));
+        resolved.assign(world->targets().size(), 0);
         seen_results = seen_rockets = seen_track_events = 0;
-        target_resolved_sent = false;
         round_ticks = 0;
         phase = Phase::kRunning;
         phase_ticks = 0;

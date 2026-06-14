@@ -122,8 +122,11 @@ class SimServer {
   // operator offsets. The journal records the RESOLVED absolute command, so
   // replays never re-solve (charter §5.8: 저널은 명령을 기록한다).
   struct SimCommand {
+    enum class Kind : std::uint8_t { kFire, kSteer };
+    Kind kind = Kind::kFire;
     sim::FireCommand fire;
     std::uint16_t track_id = 0;
+    sim::SteerCommand steer;  // Valid when kind == kSteer (own-ship maneuver).
   };
 
   // sim -> net: one tick's outbound bundle.
@@ -175,6 +178,7 @@ class SimServer {
   void on_transport_closed(net::TcpSession& transport, const char* reason);
   void handle_hello(net::TcpSession& transport, const protocol::ClientHello& hello);
   void handle_fire(net::TcpSession& transport, const protocol::FireRequest& fire);
+  void handle_steer(net::TcpSession& transport, const protocol::ShipCommand& steer);
   void reject_and_close(net::TcpSession& transport, protocol::RejectReason reason);
   void on_udp_datagram(std::span<const std::uint8_t> payload, const sockaddr_in& from);
   // Stateless scan of an unknown-address datagram for a UdpHello token
