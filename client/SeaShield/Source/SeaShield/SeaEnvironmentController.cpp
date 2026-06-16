@@ -91,16 +91,21 @@ void ASeaEnvironmentController::ApplySeaState(const FSeaWeather& Weather) const
 	// ~1.2 m seas. Wavelengths stretch with the wind; the directional spread
 	// narrows as the wind organizes the sea.
 	const double EffectiveWind = WindSpeedMps + 0.5 * Weather.GustSigmaMps;
-	const float MaxAmplitudeCm = FMath::Clamp(8.0 + FMath::Pow(EffectiveWind, 1.7), 8.0, 150.0);
+	// The hull is buoyancy-coupled (SeaWorldManager rides the Gerstner surface), so the
+	// sea can run as a real swell without the fixed-Z hull clipping. Scale the wind-driven
+	// amplitude up into metre-scale crests that break + catch the foam.
+	const float MaxAmplitudeCm = FMath::Clamp((16.0 + FMath::Pow(EffectiveWind, 1.7)) * 1.5, 35.0, 240.0);
 	const float MinAmplitudeCm = MaxAmplitudeCm / 10.0f;
 	const float MaxWavelengthCm = FMath::Clamp(4000.0 + EffectiveWind * 700.0, 6000.0, 18000.0);
 	const float MinWavelengthCm = 700.0f;
 	const float SpreadDeg = FMath::Clamp(110.0 - EffectiveWind * 3.5, 45.0, 110.0);
 
+	// Sharper crests (was 0.18/0.12, gently rounded) so the sea reads as a real,
+	// breaking swell and the Gerstner peaks rise enough to catch the MI_SeaOcean foam.
 	USeaLevelSetupLibrary::AssignGeneratedOceanWaves(
 	    Ocean, /*Seed=*/7, /*NumWaves=*/32, MinWavelengthCm, MaxWavelengthCm, MinAmplitudeCm,
 	    MaxAmplitudeCm, static_cast<float>(WindBearingDeg), SpreadDeg,
-	    /*SmallWaveSteepness=*/0.18f, /*LargeWaveSteepness=*/0.12f);
+	    /*SmallWaveSteepness=*/0.42f, /*LargeWaveSteepness=*/0.30f);
 	UE_LOG(LogSeaEnvironment, Display,
 	       TEXT("Sea state applied: wind %.1f m/s @ %.0fdeg gust_sigma %.2f -> amp<=%.0f cm wl<=%.0f cm"),
 	       WindSpeedMps, WindBearingDeg, Weather.GustSigmaMps, MaxAmplitudeCm, MaxWavelengthCm);
