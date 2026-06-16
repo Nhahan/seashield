@@ -133,50 +133,56 @@ def _sprite_flash(size=256):
     return (np.clip(np.dstack([rgb, alpha]), 0, 1) * 255).astype(np.uint8)
 
 
+def _ship_detail(seeds):
+    """One variation of the plate/weld/weathering detail maps -> (normal, rao, dirt_mask).
+    The plate GRID stays regular (real plating is regular), but the SEEDED fields —
+    plate-offset, micro-tooth, weathering, rust — differ per `seeds`. A 2nd variation
+    blended in-engine by a low-freq macro mask therefore breaks the visible ~6.5 m
+    triplanar tile repeat (the same rust blotch no longer recurs every tile). P2-5.
+    1024 px over a 4 m tile => 256 px/m: 1 m plates, 0.25 m sub-panels."""
+    major, minor = 256, 64  # divide SIZE => seamless
+    seam_major = _seam(SIZE, major, 2)
+    seam_minor = _seam(SIZE, minor, 1)
+    # Height -> normal: subtle architectural plating, NOT corrugation.
+    height = np.zeros((SIZE, SIZE))
+    height += 0.10 * _plate_offsets(SIZE, major, seeds["plate"])  # plates not perfectly flush
+    height -= 0.45 * seam_major                                   # recessed plate seams
+    height -= 0.16 * seam_minor                                   # finer panel lines
+    height += 0.018 * _norm01(_seamless_fbm(SIZE, 1.5, seeds["tooth"]))  # faint micro tooth
+    normal = _height_to_normal(height, strength=1.2)
+    # Roughness / AO / dirt.
+    rough = np.full((SIZE, SIZE), 0.42)                           # painted-metal base
+    rough += 0.22 * (_norm01(_seamless_fbm(SIZE, 2.3, seeds["weather"])) - 0.5) * 2.0
+    rough += 0.16 * seam_major + 0.09 * seam_minor
+    dirt = _norm01(_seamless_fbm(SIZE, 2.8, seeds["dirt"]))
+    dirt_mask = np.clip((dirt - 0.68) / 0.18, 0.0, 1.0)           # sparse rust/dirt patches
+    rough += 0.22 * dirt_mask
+    rough = np.clip(rough, 0.06, 0.92)
+    ao = np.ones((SIZE, SIZE))
+    ao -= 0.55 * seam_major + 0.30 * seam_minor
+    ao -= 0.18 * dirt_mask
+    ao = np.clip(ao, 0.0, 1.0)
+    return normal, np.stack([rough, ao, dirt_mask], axis=-1), dirt_mask
+
+
 def build():
     os.makedirs(OUT_DIR, exist_ok=True)
 
-    # 1024 px over a 4 m triplanar tile => 256 px/m: 1 m plates, 0.25 m sub-panels.
-    major = 256  # plate seams (1 m)
-    minor = 64   # panel lines (0.25 m)
-
-    seam_major = _seam(SIZE, major, 2)
-    seam_minor = _seam(SIZE, minor, 1)
-
-    # --- Height -> normal -----------------------------------------------------
-    # Subtle architectural plating, NOT corrugation: gentle relief + low strength
-    # so panels read as clean welded plate under raking light, not rippled fabric.
-    height = np.zeros((SIZE, SIZE))
-    height += 0.10 * _plate_offsets(SIZE, major, 7)   # plates not perfectly flush
-    height -= 0.45 * seam_major                       # recessed plate seams
-    height -= 0.16 * seam_minor                       # finer panel lines
-    height += 0.018 * _norm01(_seamless_fbm(SIZE, 1.5, 11))  # faint micro tooth
-    normal = _height_to_normal(height, strength=1.2)
-
-    # --- Roughness / AO / dirt ------------------------------------------------
-    rough = np.full((SIZE, SIZE), 0.42)               # painted-metal base
-    rough += 0.22 * (_norm01(_seamless_fbm(SIZE, 2.3, 23)) - 0.5) * 2.0  # weathering breakup
-    rough += 0.16 * seam_major + 0.09 * seam_minor    # seams scuffed/rougher
-
-    dirt = _norm01(_seamless_fbm(SIZE, 2.8, 53))
-    dirt_mask = np.clip((dirt - 0.68) / 0.18, 0.0, 1.0)  # sparser rust/dirt patches
-    rough += 0.22 * dirt_mask                          # rust is rough
-    rough = np.clip(rough, 0.06, 0.92)
-
-    ao = np.ones((SIZE, SIZE))
-    ao -= 0.55 * seam_major + 0.30 * seam_minor        # occlusion in the seams
-    ao -= 0.18 * dirt_mask                             # grime darkens
-    ao = np.clip(ao, 0.0, 1.0)
-
-    rao = np.stack([rough, ao, dirt_mask], axis=-1)
-
-    # --- Write ----------------------------------------------------------------
-    n_path = os.path.join(OUT_DIR, "T_ShipDetail_N.png")
-    rao_path = os.path.join(OUT_DIR, "T_ShipDetail_RAO.png")
-    Image.fromarray((np.clip(normal, 0, 1) * 255).astype(np.uint8), "RGB").save(n_path)
-    Image.fromarray((np.clip(rao, 0, 1) * 255).astype(np.uint8), "RGB").save(rao_path)
-    print(f"textures: wrote {n_path}")
-    print(f"textures: wrote {rao_path}")
+    # TWO baked variations of the ship detail (suffix "" = original seeds, "2" = a
+    # different seed set). The material blends them by a macro mask so the hull's
+    # weathering/rust no longer recurs every triplanar tile (anti-tiling, P2-5).
+    variants = [
+        ("",  {"plate": 7,   "tooth": 11,  "weather": 23,  "dirt": 53}),
+        ("2", {"plate": 907, "tooth": 311, "weather": 223, "dirt": 653}),
+    ]
+    for suffix, seeds in variants:
+        normal, rao, dirt_mask = _ship_detail(seeds)
+        n_path = os.path.join(OUT_DIR, f"T_ShipDetail_N{suffix}.png")
+        rao_path = os.path.join(OUT_DIR, f"T_ShipDetail_RAO{suffix}.png")
+        Image.fromarray((np.clip(normal, 0, 1) * 255).astype(np.uint8), "RGB").save(n_path)
+        Image.fromarray((np.clip(rao, 0, 1) * 255).astype(np.uint8), "RGB").save(rao_path)
+        print(f"textures: wrote {n_path} + {rao_path} "
+              f"(variant{suffix or '0'}, dirt {100.0 * (dirt_mask > 0.1).mean():.1f}%)")
 
     smoke_path = os.path.join(OUT_DIR, "T_Smoke.png")
     flash_path = os.path.join(OUT_DIR, "T_Flash.png")
@@ -184,8 +190,6 @@ def build():
     Image.fromarray(_sprite_flash(), "RGBA").save(flash_path)
     print(f"textures: wrote {smoke_path}")
     print(f"textures: wrote {flash_path}")
-    print(f"textures: dirt coverage {100.0 * (dirt_mask > 0.1).mean():.1f}%, "
-          f"rough[min/mean/max] {rough.min():.2f}/{rough.mean():.2f}/{rough.max():.2f}")
 
 
 if __name__ == "__main__":

@@ -16,6 +16,10 @@ DEST = "/Game/SeaShield/Textures"
 TEXTURES = [
     ("T_ShipDetail_N.png", "T_ShipDetail_N", "normal"),
     ("T_ShipDetail_RAO.png", "T_ShipDetail_RAO", "masks"),
+    # Second baked detail variation — blended against the first by a macro mask in the
+    # material to break the triplanar tile repeat on the hull (anti-tiling, P2-5).
+    ("T_ShipDetail_N2.png", "T_ShipDetail_N2", "normal"),
+    ("T_ShipDetail_RAO2.png", "T_ShipDetail_RAO2", "masks"),
     ("T_Smoke.png", "T_Smoke", "sprite"),
     ("T_Flash.png", "T_Flash", "sprite"),
 ]

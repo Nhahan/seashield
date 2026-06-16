@@ -99,6 +99,22 @@ def details(lod):
         for i, wx in enumerate((-0.7, 0.0, 0.7)):  # mast whip antennas
             add(lib.slanted_box(f"whip{i}", 14.5, 15.0, 0.16, 28.5, 31.8, slope_deg=1.5,
                                 center_x=wx), gray)
+        # Embarked helo on the aft flight deck (Wildcat-class silhouette) — a big
+        # "modern frigate" read at the hero framing. Faceted like the rest of the ship:
+        # boxy fuselage + dark canopy, tail boom + fin, and a low-poly main-rotor cross.
+        add(lib.slanted_box("helo_body", -55.0, -49.5, 2.2, 5.2, 7.3, slope_deg=9.0), gray)
+        add(lib.slanted_box("helo_nose", -49.5, -48.2, 1.9, 5.2, 6.7, slope_deg=18.0), dark)
+        add(lib.cylinder("helo_tail", 0.22, 4.4, 6, (0.0, -59.2, 6.35)), gray)
+        add(lib.slanted_box("helo_fin", -59.4, -58.9, 0.28, 6.2, 8.2, slope_deg=5.0), gray)
+        add(lib.slanted_box("helo_hub", -52.9, -52.1, 0.7, 7.3, 7.9, slope_deg=10.0), dark)
+        add(lib.slanted_box("helo_rotorA", -52.85, -52.15, 11.4, 7.92, 8.04, slope_deg=0.0), dark)
+        add(lib.slanted_box("helo_rotorB", -57.9, -47.1, 0.5, 7.92, 8.04, slope_deg=0.0), dark)
+        # Liferaft canisters stowed along the deck edge (both sides) — small faceted
+        # cylinders that break up the long bare sheerline and read as fitted-out.
+        for i, yy in enumerate((16.0, 6.0, -4.0)):
+            for sx in (-5.3, 5.3):
+                add(lib.cylinder(f"raft_{i}_{'p' if sx < 0 else 's'}", 0.45, 1.5, 8,
+                                 (sx, yy, 5.75)), dark)
     return out
 
 
