@@ -19,5 +19,9 @@ public class SeaShield : ModuleRules
 
 		// Code-driven trail/splash ribbons (SeaWorldManager).
 		PrivateDependencyModuleNames.Add("ProceduralMeshComponent");
+
+		// Per-thread frame timing globals (GGameThreadTime/GRenderThreadTime) for
+		// the spike-forensics log in SeaWorldManager::Tick.
+		PrivateDependencyModuleNames.Add("RenderCore");
 	}
 }

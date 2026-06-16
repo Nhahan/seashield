@@ -141,6 +141,28 @@ void ASeaShieldGameModeBase::BeginPlay()
 		    1.5f, false);
 	}
 
+	// -SeaProfileGPU=<seconds>: after warmup, dump a hierarchical per-pass GPU
+	// breakdown to the log (ProfileGPU with the UI off) so perf_summary.sh can
+	// attribute frame cost per pass WITHOUT reading an on-screen stat overlay.
+	// Pair with -SeaQuit to bound the run. -ExecCmds is inert in -game on 5.7,
+	// so this fires from a timer via GEngine->Exec like -SeaStat.
+	float ProfileGpuDelay = 0.0f;
+	if (FParse::Value(FCommandLine::Get(), TEXT("SeaProfileGPU="), ProfileGpuDelay))
+	{
+		FTimerHandle ProfileTimer;
+		GetWorld()->GetTimerManager().SetTimer(
+		    ProfileTimer,
+		    [WeakWorld = TWeakObjectPtr<UWorld>(GetWorld())]()
+		    {
+			    if (WeakWorld.IsValid() && GEngine != nullptr)
+			    {
+				    GEngine->Exec(WeakWorld.Get(), TEXT("r.ProfileGPU.ShowUI 0"));
+				    GEngine->Exec(WeakWorld.Get(), TEXT("ProfileGPU"));
+			    }
+		    },
+		    FMath::Max(ProfileGpuDelay, 1.0f), false);
+	}
+
 	// -SeaQuit=<seconds>: exit with NO screenshot — the screenshot's GPU
 	// readback is itself a ~400 ms frame (hitch forensics), so performance
 	// measurement runs must not take one.
