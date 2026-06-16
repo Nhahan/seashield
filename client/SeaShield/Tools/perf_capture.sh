@@ -23,7 +23,7 @@ ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 UE="${UE:-/Users/Shared/Epic Games/UE_5.7}"
 PROJ="$ROOT/client/SeaShield/SeaShield.uproject"
 
-DUR=30; RESX=2560; RESY=1440; SCN=game.scn; GPU=0; IDLE=0; PORT=7777; CVARS=""
+DUR=30; RESX=2560; RESY=1440; SCN=game.scn; GPU=0; IDLE=0; PORT=7777; CVARS=""; CINE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dur) DUR=$2; shift 2;;
@@ -33,9 +33,20 @@ while [ $# -gt 0 ]; do
     --idle) IDLE=1; shift;;
     --port) PORT=$2; shift 2;;
     --cvars) CVARS=$2; shift 2;;   # comma-list to -dpcvars, e.g. r.Water.WaterMesh.TessFactorBias=-6
+    --cinematic) CINE=1; shift;;   # apply the cinematic capture tier (Tools/cinematic.cvars) — fps unconstrained
     *) echo "perf_capture: unknown arg $1" >&2; exit 2;;
   esac
 done
+
+# The cinematic tier prepends Tools/cinematic.cvars (comments/blanks stripped,
+# joined with commas) to any explicit --cvars, so --cvars still wins on conflict
+# (-dpcvars takes the LAST value for a given cvar). See cinematic.cvars header.
+if [ "$CINE" = 1 ]; then
+  CINE_FILE="$(dirname "$0")/cinematic.cvars"
+  [ -f "$CINE_FILE" ] || { echo "perf_capture: $CINE_FILE missing" >&2; exit 1; }
+  CINE_LIST="$(grep -v '^[[:space:]]*#' "$CINE_FILE" | grep -v '^[[:space:]]*$' | tr -d '[:blank:]' | paste -sd, -)"
+  [ -n "$CVARS" ] && CVARS="$CINE_LIST,$CVARS" || CVARS="$CINE_LIST"
+fi
 
 [ -x "$ROOT/build/seashield_server" ] || {
   echo "server binary missing — build it first:  cmake --build build" >&2; exit 1; }
@@ -56,10 +67,11 @@ sleep 1.5
 FLAGS=(-game -windowed "-ResX=$RESX" "-ResY=$RESY" -nosplash "-SeaServer=127.0.0.1:$PORT" "-SeaQuit=$DUR")
 if [ "$IDLE" = 1 ]; then FLAGS+=(-SeaRole=observer); else FLAGS+=(-SeaRole=solo -SeaGamePlay); fi
 [ "$GPU" = 1 ] && FLAGS+=("-SeaProfileGPU=$((DUR - 4))")
+[ "$CINE" = 1 ] && FLAGS+=("-SeaCinematic")
 [ -n "$CVARS" ] && FLAGS+=("-dpcvars=$CVARS")
 FLAGS+=("-abslog=$ABSLOG")
 
-echo "perf_capture: ${RESX}x${RESY}  dur=${DUR}s  scenario=$SCN  $([ "$IDLE" = 1 ] && echo idle || echo gameplay)$([ "$GPU" = 1 ] && echo ' +gpu')"
+echo "perf_capture: ${RESX}x${RESY}  dur=${DUR}s  scenario=$SCN  $([ "$IDLE" = 1 ] && echo idle || echo gameplay)$([ "$GPU" = 1 ] && echo ' +gpu')$([ "$CINE" = 1 ] && echo ' +cinematic')"
 "$UE/Engine/Binaries/Mac/UnrealEditor" "$PROJ" "${FLAGS[@]}" >/tmp/seashield_perf_ue_$PORT.log 2>&1 &
 
 # Monitor by COMMAND LINE, not PID: the Mac launcher exits early while the real

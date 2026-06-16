@@ -1,0 +1,65 @@
+# SeaShield — cinematic / photo capture tier (single source of truth).
+#
+# Applied via -dpcvars by the --cinematic harness flag (perf_capture.sh,
+# cinematic_shot.sh). -dpcvars lands during device-profile consolidation —
+# BEFORE renderer init and the water-mesh build — so even the water tessellation
+# biases take effect cleanly without a runtime rebuild, and it OVERRIDES the
+# cost-optimized DefaultEngine.ini [SystemSettings].
+#
+# This is the trailer/screenshot tier: fps is UNCONSTRAINED. The gameplay tier
+# (no --cinematic) keeps the [SystemSettings] budget and holds the fps gate.
+# Lines are `cvar=value`; `#` comments and blanks are stripped by the harness.
+#
+# --- Internal resolution: native 1440p (drop the TSR 90% upscale). Stills can
+#     supersample beyond this via cinematic_shot.sh --sp 150. ---
+r.ScreenPercentage=100
+#
+# --- Water geometry: restore full Gerstner tessellation + LOD reach (was
+#     TessFactorBias=-6 / LODScaleBias=-0.5 / LODCountBias=-1) for sharp crests
+#     and fine near-camera wave detail. ---
+r.Water.WaterMesh.TessFactorBias=0
+# Near detail full (TessFactorBias 0), but a mild LOD pull-in so the DISTANT Gerstner
+# wave geometry doesn't tile into a visible horizon repeat at full tessellation (the
+# gameplay tier hides this via its deeper pull-in). -0.25 calms the far band only.
+r.Water.WaterMesh.LODScaleBias=-0.25
+r.Water.WaterMesh.LODCountBias=0
+#
+# --- Water shading: full-res reflection + refraction (was half-res). This is
+#     the costliest SingleLayerWater term, restored for mirror-grade sea. ---
+r.Water.SingleLayer.Reflection.DownsampleFactor=1
+r.Water.SingleLayer.RefractionDownsampleFactor=1
+#
+# --- Volumetric clouds: full-res trace (was quarter-res reconstruct, Mode 2
+#     Scale 0.5) for crisp cloud edges and clean godray occlusion. ---
+r.VolumetricRenderTarget.Mode=0
+r.VolumetricRenderTarget.Scale=1.0
+r.VolumetricCloud.ReflectionRaySampleMaxCount=80
+#
+# --- Lumen GI + reflections: accurate sea-surface and hull reflections (the AAA
+#     jump over SSR — no screen-edge dropout, real off-screen sky/hull in the
+#     water). GI is already Lumen project-wide; ReflectionMethod=1 forces Lumen
+#     reflections and DownsampleFactor=1 traces them full-res. (NOTE: the
+#     "quality" is governed by the reflection downsample + the GI scalability
+#     group, NOT an r.Lumen.Reflections.Quality cvar — that name is a no-op /
+#     dummy in 5.7, verified by the dpcvars log, so it is intentionally absent.) ---
+r.DynamicGlobalIlluminationMethod=1
+r.ReflectionMethod=1
+r.Lumen.Reflections.DownsampleFactor=1
+#
+# --- Shadows: sharper directional virtual shadow maps for the hull/rigging. ---
+r.Shadow.Virtual.ResolutionLodBiasDirectional=-1.5
+#
+# --- Post-process quality ceilings (bloom/MB/AO/aniso/SSS). The artistic amounts
+#     (DOF focus, motion-blur strength) live on the level PostProcessVolume + the
+#     Phase-4 -SeaCinematic camera override; these just lift the quality buckets.
+#     (r.DepthOfField.Quality is a dummy at dpcvar stage — DOF is driven by the PP
+#     volume instead, so it is intentionally absent here.) ---
+r.BloomQuality=5
+r.MotionBlurQuality=4
+r.AmbientOcclusionLevels=3
+r.MaxAnisotropy=16
+r.SSS.Quality=1
+#
+# --- TSR: max history resolution so motion (panning sea, flying rockets) stays
+#     razor-sharp instead of ghosting. ---
+r.TSR.History.ScreenPercentage=200

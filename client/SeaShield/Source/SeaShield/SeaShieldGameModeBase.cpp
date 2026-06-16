@@ -6,6 +6,7 @@
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/PlayerStart.h"
 #include "GameFramework/SpectatorPawn.h"
+#include "HAL/IConsoleManager.h"
 #include "HAL/PlatformMisc.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
@@ -24,6 +25,8 @@
 #include "SeaShieldPlayerController.h"
 #include "SeaWorldFrame.h"
 #include "SeaWorldManager.h"
+
+DEFINE_LOG_CATEGORY_STATIC(LogSeaShieldGame, Log, All);
 
 namespace {
 
@@ -66,6 +69,44 @@ void ASeaShieldGameModeBase::BeginPlay()
 	Super::BeginPlay();
 	EnsureSingleton<ASeaWorldManager>(GetWorld());
 	EnsureSingleton<ASeaEnvironmentController>(GetWorld());
+
+	// -SeaCinematic: the trailer / screenshot quality tier. The cvar PROFILE
+	// (Tools/cinematic.cvars — full water tessellation, full-res reflections /
+	// clouds, Lumen reflections, supersample) is applied earlier by -dpcvars via
+	// the --cinematic harness flag, because several biases must land before the
+	// renderer / water-mesh build. Here we CONFIRM the tier engaged by reading the
+	// live cvar values into the log, so a cinematic capture run is self-verifying
+	// without needing a ProfileGPU pass dump. (Phase-4 cinematic post-process —
+	// DOF / motion-blur framing the action — will hook in here.)
+	if (FParse::Param(FCommandLine::Get(), TEXT("SeaCinematic")))
+	{
+		const auto CVarFloat = [](const TCHAR* Name) -> float
+		{
+			const IConsoleVariable* V = IConsoleManager::Get().FindConsoleVariable(Name);
+			return V != nullptr ? V->GetFloat() : -1.0f;
+		};
+		UE_LOG(LogSeaShieldGame, Display,
+		       TEXT("SeaCinematic tier ACTIVE — ScreenPercentage=%.0f WaterTessBias=%.0f "
+		            "WaterReflDownsample=%.0f CloudRTMode=%.0f ReflectionMethod=%.0f "
+		            "LumenReflDownsample=%.0f"),
+		       CVarFloat(TEXT("r.ScreenPercentage")),
+		       CVarFloat(TEXT("r.Water.WaterMesh.TessFactorBias")),
+		       CVarFloat(TEXT("r.Water.SingleLayer.Reflection.DownsampleFactor")),
+		       CVarFloat(TEXT("r.VolumetricRenderTarget.Mode")),
+		       CVarFloat(TEXT("r.ReflectionMethod")),
+		       CVarFloat(TEXT("r.Lumen.Reflections.DownsampleFactor")));
+
+		// Trailer / screenshot hygiene: suppress the engine's on-screen debug
+		// messages (the persistent red text from dev-time warnings, e.g. a
+		// material's "missing bUsedWith..." note) so cinematic stills are clean.
+		// This is tier-scoped — gameplay / dev captures keep screen messages ON so
+		// real warnings stay visible. It hides only GEngine debug TEXT, not the
+		// UMG tactical HUD.
+		if (GEngine != nullptr)
+		{
+			GEngine->Exec(GetWorld(), TEXT("DisableAllScreenMessages"));
+		}
+	}
 
 	// The tactical HUD: PPI scope (bottom-left) + fire-control console
 	// (bottom-right). Pure C++ widgets — no UMG assets to wire. Both gate
