@@ -5,6 +5,7 @@
 #include "InputCoreTypes.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
+#include "HAL/PlatformTime.h"
 
 #include "SeaBallistics.h"
 #include "SeaGunnerPawn.h"
@@ -70,6 +71,16 @@ void ASeaShieldPlayerController::SetupInputComponent()
 	InputComponent->BindKey(EKeys::LeftMouseButton, IE_Pressed, this, &ASeaShieldPlayerController::Fire);
 	InputComponent->BindAxisKey(EKeys::MouseX, this, &ASeaShieldPlayerController::Turn);
 	InputComponent->BindAxisKey(EKeys::MouseY, this, &ASeaShieldPlayerController::LookUp);
+	// Third-person camera: wheel dollies the orbit, RMB/Shift held = sight zoom.
+	InputComponent->BindKey(EKeys::MouseScrollUp, IE_Pressed, this, &ASeaShieldPlayerController::OrbitIn);
+	InputComponent->BindKey(EKeys::MouseScrollDown, IE_Pressed, this, &ASeaShieldPlayerController::OrbitOut);
+	InputComponent->BindKey(EKeys::RightMouseButton, IE_Pressed, this, &ASeaShieldPlayerController::SightOn);
+	InputComponent->BindKey(EKeys::RightMouseButton, IE_Released, this, &ASeaShieldPlayerController::SightOff);
+	InputComponent->BindKey(EKeys::LeftShift, IE_Pressed, this, &ASeaShieldPlayerController::SightOn);
+	InputComponent->BindKey(EKeys::LeftShift, IE_Released, this, &ASeaShieldPlayerController::SightOff);
+	// MMB (wheel button) held = free-look: mouse adjusts the camera angle, not the aim.
+	InputComponent->BindKey(EKeys::MiddleMouseButton, IE_Pressed, this, &ASeaShieldPlayerController::FreeLookOn);
+	InputComponent->BindKey(EKeys::MiddleMouseButton, IE_Released, this, &ASeaShieldPlayerController::FreeLookOff);
 	// Helm: A/D rudder (momentary), W/S throttle (set-points). Free keys — they
 	// do not touch the mouse-look gun aim.
 	InputComponent->BindKey(EKeys::A, IE_Pressed, this, &ASeaShieldPlayerController::RudderLeftPressed);
@@ -98,13 +109,28 @@ void ASeaShieldPlayerController::SendSteer()
 
 void ASeaShieldPlayerController::Turn(float AxisValue)
 {
-	if (AxisValue != 0.0f) { if (ASeaGunnerPawn* G = Gunner()) { G->AddAzimuth(AxisValue * MouseSensitivity); } }
+	if (AxisValue == 0.0f) { return; }
+	ASeaGunnerPawn* G = Gunner();
+	if (G == nullptr) { return; }
+	if (bFreeLook) { G->AddOrbitYaw(AxisValue * OrbitSensitivity); }
+	else { G->AddAzimuth(AxisValue * MouseSensitivity * G->AimSensitivityScale()); }
 }
 
 void ASeaShieldPlayerController::LookUp(float AxisValue)
 {
-	if (AxisValue != 0.0f) { if (ASeaGunnerPawn* G = Gunner()) { G->AddElevation(AxisValue * MouseSensitivity); } }
+	if (AxisValue == 0.0f) { return; }
+	ASeaGunnerPawn* G = Gunner();
+	if (G == nullptr) { return; }
+	if (bFreeLook) { G->AddOrbitPitch(AxisValue * OrbitSensitivity); }
+	else { G->AddElevation(AxisValue * MouseSensitivity * G->AimSensitivityScale()); }
 }
+
+void ASeaShieldPlayerController::OrbitIn()  { if (ASeaGunnerPawn* G = Gunner()) { G->AddOrbitDistance(-900.0f); } }
+void ASeaShieldPlayerController::OrbitOut() { if (ASeaGunnerPawn* G = Gunner()) { G->AddOrbitDistance(+900.0f); } }
+void ASeaShieldPlayerController::SightOn()  { if (ASeaGunnerPawn* G = Gunner()) { G->SetSightMode(true); } }
+void ASeaShieldPlayerController::SightOff() { if (ASeaGunnerPawn* G = Gunner()) { G->SetSightMode(false); } }
+void ASeaShieldPlayerController::FreeLookOn()  { bFreeLook = true; }
+void ASeaShieldPlayerController::FreeLookOff() { bFreeLook = false; }
 
 void ASeaShieldPlayerController::SalvoUp()       { if (auto* N = Net()) N->AdjustSalvo(+1); }
 void ASeaShieldPlayerController::SalvoDown()     { if (auto* N = Net()) N->AdjustSalvo(-1); }
@@ -277,13 +303,20 @@ void ASeaShieldPlayerController::TickGamePlayDemo(float DeltaSeconds)
 	if (ReaimTimer <= 0.0f)
 	{
 		ReaimTimer = 0.35f;
+		// The scripted auto-gunner's aim solve runs on the game thread; time it so
+		// the perf process can see this re-aim cost (it was the gameplay frame
+		// spike before SolveAim went coarse-to-fine — performance-report §6).
+		const double SolveT0 = FPlatformTime::Seconds();
 		const SeaBallistics::FAimSolution Sol = SeaBallistics::SolveAim(WindEnu, TPosEnu, TVelEnu);
+		const double SolveMs = (FPlatformTime::Seconds() - SolveT0) * 1000.0;
 		bHaveSolution = Sol.bValid;
 		if (Sol.bValid)
 		{
 			SolvedAzDeg = Sol.AzimuthDeg;
 			SolvedElDeg = Sol.ElevationDeg;
 		}
+		UE_LOG(LogSeaInput, Display, TEXT("auto-gunner SolveAim %.1f ms (miss=%.1f m)"), SolveMs,
+		       Sol.bValid ? Sol.MissM : -1.0f);
 	}
 	if (!bHaveSolution)
 	{

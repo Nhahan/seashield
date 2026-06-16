@@ -8,9 +8,13 @@
 #
 # CONTROLS
 #   Mouse            slew the launcher (azimuth / elevation)
+#   Wheel scroll     zoom in / out (camera distance)
+#   Wheel button     hold + move mouse = free-look (adjust camera angle)
+#   RMB / Shift      hold = first-person sniper sight (precise aim)
 #   F / Space / LMB  fire the unguided salvo down the current bore
 #   [ / ]            salvo size  (rockets per volley)
 #   ; / '            pattern dispersion (mrad)
+#   A / D / W / S    helm: rudder (A/D) and throttle (W/S)
 #   Arrow keys       fine trim
 #
 # HOW TO PLAY

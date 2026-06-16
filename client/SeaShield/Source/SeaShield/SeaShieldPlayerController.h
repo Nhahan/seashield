@@ -47,6 +47,18 @@ private:
 	void LookUp(float AxisValue);
 	ASeaGunnerPawn* Gunner() const;
 
+	// Third-person camera: wheel scroll = zoom (dolly); MMB held = free-look (mouse
+	// adjusts the camera angle instead of the aim); RMB/Shift held = sight zoom.
+	void OrbitIn();
+	void OrbitOut();
+	void SightOn();
+	void SightOff();
+	void FreeLookOn();
+	void FreeLookOff();
+	bool bFreeLook = false;
+	UPROPERTY(EditAnywhere, Category = "SeaShield")
+	float OrbitSensitivity = 0.3f;  // degrees per mouse unit when free-looking
+
 	// Helm: A/D are momentary rudder (hold to turn, release to center); W/S set
 	// the throttle (held set-points). Each change sends one ShipCommand. The
 	// world-referenced gun aim is independent, so steering never fights the mouse.
