@@ -8,6 +8,7 @@
 #include "Styling/CoreStyle.h"
 #include "Widgets/SLeafWidget.h"
 
+#include "SeaHudStyle.h"
 #include "SeaPpiWidget.h"
 
 namespace {
@@ -79,18 +80,10 @@ public:
 			return LayerId;
 		}
 
-		static const FSlateColorBrush BackgroundBrush(FLinearColor::White);
-		FSlateDrawElement::MakeBox(OutDrawElements, LayerId, AllottedGeometry.ToPaintGeometry(),
-		                           &BackgroundBrush, ESlateDrawEffect::None,
-		                           FLinearColor(0.01f, 0.02f, 0.012f, 0.88f));
-		++LayerId;
-
-		// Bezel.
-		const TArray<FVector2D> Frame = {
-		    FVector2D(1, 1), FVector2D(Size.X - 1, 1), FVector2D(Size.X - 1, Size.Y - 1),
-		    FVector2D(1, Size.Y - 1), FVector2D(1, 1)};
-		FSlateDrawElement::MakeLines(OutDrawElements, LayerId, AllottedGeometry.ToPaintGeometry(),
-		                             Frame, ESlateDrawEffect::None, Data->DimColor, true, 1.2f);
+		// Framed combat-console panel (glassy fill + accent rule + corner brackets).
+		SeaHud::ConsolePanel(OutDrawElements, LayerId, AllottedGeometry, FVector2f(0.0f, 0.0f),
+		                     FVector2f(Size.X, Size.Y));
+		LayerId += 2;
 
 		const FSlateFontInfo Font = FCoreStyle::GetDefaultFontStyle(TEXT("Mono"), 11);
 		const FSlateFontInfo HeaderFont = FCoreStyle::GetDefaultFontStyle(TEXT("Mono"), 12);

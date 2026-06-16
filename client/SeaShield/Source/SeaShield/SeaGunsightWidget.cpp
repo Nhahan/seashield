@@ -14,6 +14,7 @@
 
 #include "SeaBallistics.h"
 #include "SeaGunnerPawn.h"
+#include "SeaHudStyle.h"
 #include "SeaWorldFrame.h"
 
 // Reticle + target-designator painter.
@@ -103,12 +104,16 @@ public:
 
 		const float Pulse = Data->Pulse();
 
-		// Center reticle: a gap-cross, outlined so it survives bright cloud/sea.
+		// Bore reticle: a gap-cross at where the gun points (third-person: the
+		// camera is not the bore, so the reticle tracks the projected bore; in the
+		// sight it sits near centre). Falls back to centre if the bore is behind us.
 		const FLinearColor R = Data->ReticleColor;
-		OutLine(Out, Layer, Geo, Center + FVector2D(-22, 0), Center + FVector2D(-7, 0), R, 1.6f);
-		OutLine(Out, Layer, Geo, Center + FVector2D(7, 0), Center + FVector2D(22, 0), R, 1.6f);
-		OutLine(Out, Layer, Geo, Center + FVector2D(0, -22), Center + FVector2D(0, -7), R, 1.6f);
-		OutLine(Out, Layer, Geo, Center + FVector2D(0, 7), Center + FVector2D(0, 22), R, 1.6f);
+		const USeaGunsightWidget::FAimPoint Bore = Data->BoreReticlePoint();
+		const FVector2D ReticleAt = (Bore.bValid && Bore.bOnScreen) ? Bore.Local : Center;
+		OutLine(Out, Layer, Geo, ReticleAt + FVector2D(-22, 0), ReticleAt + FVector2D(-7, 0), R, 1.6f);
+		OutLine(Out, Layer, Geo, ReticleAt + FVector2D(7, 0), ReticleAt + FVector2D(22, 0), R, 1.6f);
+		OutLine(Out, Layer, Geo, ReticleAt + FVector2D(0, -22), ReticleAt + FVector2D(0, -7), R, 1.6f);
+		OutLine(Out, Layer, Geo, ReticleAt + FVector2D(0, 7), ReticleAt + FVector2D(0, 22), R, 1.6f);
 
 		const FSlateFontInfo Font = FCoreStyle::GetDefaultFontStyle(TEXT("Mono"), 11);
 		const FSlateFontInfo RangeFont = FCoreStyle::GetDefaultFontStyle(TEXT("Mono"), 13);
@@ -296,6 +301,9 @@ public:
 			const FString Line1 =
 			    FString::Printf(TEXT("THREAT  %.1f KM   CLOSING %.0f m/s%s"),
 			                    Threat.RangeM / 1000.0f, Threat.ClosingMps, *TtiStr);
+			// Framed console strip whose accent glows with threat urgency (Warn).
+			SeaHud::ConsolePanel(Out, Layer + 4, Geometry, FVector2f(Center.X - 268, 54),
+			                     FVector2f(556, 34), Warn);
 			Label(Out, Layer + 5, Geometry, FVector2D(Center.X - 250, 60), FVector2D(520, 26), Line1,
 			      FCoreStyle::GetDefaultFontStyle(TEXT("Mono"), 15), Warn);
 		}
@@ -522,6 +530,7 @@ void USeaGunsightWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTi
 	// --- Fire-control aim aids -------------------------------------------------
 	Impact = FAimPoint{};
 	Lead = FAimPoint{};
+	BoreReticle = FAimPoint{};
 	ThreatReadout = FThreatReadout{};
 	bSolution = false;
 
@@ -546,6 +555,17 @@ void USeaGunsightWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTi
 		const double Az = Gunner->AimAzimuthDeg();
 		const double El = Gunner->AimElevationDeg();
 		FVector2D L;
+		// Reticle anchor: project a point far along the bore (UE +X=north, +Y=east;
+		// pitch=elevation, yaw=azimuth — matches the pawn's ApplyAim). In the sight
+		// this lands near screen-centre; in orbit it tracks where the gun points.
+		{
+			const FVector BoreDir = FRotator(El, Az, 0.0).Vector();
+			const FVector BorePointUeCm = ShipState.Position + BoreDir * 2000000.0;  // 20 km along bore
+			FVector2D BoreLocal;
+			BoreReticle.bValid = true;
+			BoreReticle.bOnScreen = ProjectUeCm(BorePointUeCm, BoreLocal);
+			BoreReticle.Local = BoreLocal;
+		}
 		if (bHaveTarget)
 		{
 			// 3D intercept solution: where the salvo passes nearest the threat,

@@ -38,7 +38,7 @@ public:
 	float SweepPeriodS = 2.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SeaShield")
-	FLinearColor ScopeColor = FLinearColor(0.05f, 0.32f, 0.10f);
+	FLinearColor ScopeColor = FLinearColor(0.20f, 0.55f, 0.34f);  // brighter phosphor rings
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SeaShield")
 	FLinearColor TrackColor = FLinearColor(0.45f, 1.0f, 0.55f);

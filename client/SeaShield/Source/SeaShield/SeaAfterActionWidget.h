@@ -21,10 +21,10 @@ class SEASHIELD_API USeaAfterActionWidget : public UUserWidget
 
 public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SeaShield")
-	FLinearColor TextColor = FLinearColor(0.55f, 1.0f, 0.62f);
+	FLinearColor TextColor = FLinearColor(0.62f, 1.0f, 0.78f);
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SeaShield")
-	FLinearColor DimColor = FLinearColor(0.25f, 0.6f, 0.32f);
+	FLinearColor DimColor = FLinearColor(0.40f, 0.72f, 0.58f);
 
 	const TArray<FString>& Lines() const { return CachedLines; }
 

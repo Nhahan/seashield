@@ -23,10 +23,10 @@ class SEASHIELD_API USeaFireControlPanel : public UUserWidget
 
 public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SeaShield")
-	FLinearColor TextColor = FLinearColor(0.45f, 1.0f, 0.55f);
+	FLinearColor TextColor = FLinearColor(0.62f, 1.0f, 0.78f);
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SeaShield")
-	FLinearColor DimColor = FLinearColor(0.20f, 0.55f, 0.28f);
+	FLinearColor DimColor = FLinearColor(0.40f, 0.72f, 0.58f);
 
 	// Selection source: the panel mirrors the PPI's designated track.
 	TWeakObjectPtr<const USeaPpiWidget> PpiRef;

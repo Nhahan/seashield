@@ -4,8 +4,12 @@
 #include "Components/CanvasPanel.h"
 #include "Components/CanvasPanelSlot.h"
 #include "Components/SizeBox.h"
+#include "Fonts/SlateFontInfo.h"
 #include "Rendering/DrawElements.h"
+#include "Styling/CoreStyle.h"
 #include "Widgets/SLeafWidget.h"
+
+#include "SeaHudStyle.h"
 
 namespace {
 
@@ -115,6 +119,34 @@ public:
 		                           &BackgroundBrush, ESlateDrawEffect::None,
 		                           FLinearColor(0.01f, 0.02f, 0.012f, 0.88f));
 		++LayerId;
+
+		// Bezel rim: a bright cyan ring + a faint inner ring, so the scope reads as
+		// an instrument, not a bare ring stack. Cardinal + range labels round it out.
+		DrawLines(OutDrawElements, LayerId, AllottedGeometry, CirclePoints(Center, Radius),
+		          SeaHud::Accent, 2.2f);
+		DrawLines(OutDrawElements, LayerId, AllottedGeometry, CirclePoints(Center, Radius - 4.0f),
+		          SeaHud::Dim, 0.8f);
+		{
+			const FSlateFontInfo ScopeFont = FCoreStyle::GetDefaultFontStyle(TEXT("Mono"), 11);
+			auto Label = [&](const FString& Str, const FVector2D& At, const FLinearColor& Col)
+			{
+				FSlateDrawElement::MakeText(
+				    OutDrawElements, LayerId + 1,
+				    AllottedGeometry.ToPaintGeometry(FVector2f(48, 16),
+				                                     FSlateLayoutTransform(FVector2f(At.X, At.Y))),
+				    Str, ScopeFont, ESlateDrawEffect::None, Col);
+			};
+			Label(TEXT("N"), Center + FVector2D(-4, -Radius + 3), SeaHud::Accent);
+			Label(TEXT("E"), Center + FVector2D(Radius - 14, -8), SeaHud::Accent);
+			Label(TEXT("S"), Center + FVector2D(-4, Radius - 18), SeaHud::Accent);
+			Label(TEXT("W"), Center + FVector2D(-Radius + 5, -8), SeaHud::Accent);
+			for (int32 i = 1; i <= 4; ++i)
+			{
+				const float Rkm = (Data->DisplayRangeM * i / 4.0f) / 1000.0f;
+				Label(FString::Printf(TEXT("%.0f"), Rkm),
+				      Center + FVector2D(4, -Radius * i / 4.0f - 1), SeaHud::Dim);
+			}
+		}
 
 		// Range rings (quarters of the display range) + bearing ticks / 30°.
 		for (int32 Ring = 1; Ring <= 4; ++Ring)

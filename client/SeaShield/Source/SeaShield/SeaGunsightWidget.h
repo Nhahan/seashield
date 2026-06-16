@@ -43,6 +43,9 @@ public:
 	};
 	FAimPoint ImpactPoint() const { return Impact; }
 	FAimPoint LeadPoint() const { return Lead; }
+	// Where the bore points, projected to screen — the reticle anchor (in
+	// third-person the camera is NOT the bore, so the reticle can't sit at center).
+	FAimPoint BoreReticlePoint() const { return BoreReticle; }
 	bool HasSolution() const { return bSolution; }
 
 	// Threat read-out for the inbound target: slant range, closing speed and
@@ -125,6 +128,7 @@ private:
 	TArray<FMarker> CachedMarkers;
 	FAimPoint Impact;
 	FAimPoint Lead;
+	FAimPoint BoreReticle;
 	FThreatReadout ThreatReadout;
 	FOffscreenCue OffscreenCue;
 	USeaNetSubsystem::FSeaLeadError CachedLeadError;

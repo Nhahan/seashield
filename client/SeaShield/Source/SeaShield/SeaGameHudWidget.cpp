@@ -8,6 +8,7 @@
 #include "Styling/CoreStyle.h"
 #include "Widgets/SLeafWidget.h"
 
+#include "SeaHudStyle.h"
 #include "SeaNetSubsystem.h"
 
 // Fullscreen survival-game HUD painter: scoreboard top-left, life pips, and the
@@ -70,11 +71,8 @@ public:
 			    Str, Font, ESlateDrawEffect::None, Col);
 		};
 
-		// Scoreboard panel, top-left.
-		FSlateDrawElement::MakeBox(
-		    Out, Layer,
-		    Geometry.ToPaintGeometry(FVector2f(270, 116), FSlateLayoutTransform(FVector2f(24, 22))),
-		    &Box, ESlateDrawEffect::None, FLinearColor(0.01f, 0.02f, 0.012f, 0.55f));
+		// Scoreboard panel, top-left — framed combat-console panel.
+		SeaHud::ConsolePanel(Out, Layer, Geometry, FVector2f(24, 22), FVector2f(270, 116));
 		Text(FString::Printf(TEXT("WAVE %d"), S.Wave), Big, 36, 26, Ink, 220.0f);
 		Text(FString::Printf(TEXT("SCORE  %d"), S.Score), Mid, 38, 64,
 		     FLinearColor(1.0f, 0.92f, 0.5f, 0.95f), 220.0f);
