@@ -205,20 +205,37 @@ inline FAimSolution SolveAim(const FVector& WindEnu, const FVector& TargetPosEnu
 	// Search around the bearing from the SHIP to the target, not the origin.
 	const double CenterAz = FMath::RadiansToDegrees(
 	    FMath::Atan2(TargetPosEnu.X - ShipPosEnu.X, TargetPosEnu.Y - ShipPosEnu.Y));
-	for (double Az = CenterAz - 25.0; Az <= CenterAz + 25.0; Az += 1.5)
+	// COARSE-TO-FINE. A single fine grid over the full envelope (±25° az × 4-70° el
+	// at 1.5°) is ~1500 full trajectory integrations — ~48 ms on the game thread,
+	// which the perf process caught as a stutter every 0.35 s re-aim of the
+	// scripted auto-gunner (performance-report §6). The miss(az,el) surface is
+	// smooth near the intercept, so a coarse 5° pass localizes the basin and a
+	// tight 1.5° pass refines it to the same optimum at ~1/7 the cost.
+	auto Scan = [&](double AzLo, double AzHi, double AzStep, double ElLo, double ElHi, double ElStep)
 	{
-		for (double El = 4.0; El <= 70.0; El += 1.5)
+		for (double Az = AzLo; Az <= AzHi; Az += AzStep)
 		{
-			const FFireAid Aid =
-			    ComputeFireAid(Az, El, WindEnu, TargetPosEnu, TargetVelEnu, ShipPosEnu, ShipVelEnu);
-			if (Aid.bValid && Aid.MissM < Best.MissM)
+			for (double El = ElLo; El <= ElHi; El += ElStep)
 			{
-				Best.MissM = Aid.MissM;
-				Best.AzimuthDeg = static_cast<float>(Az);
-				Best.ElevationDeg = static_cast<float>(El);
-				Best.bValid = true;
+				const FFireAid Aid =
+				    ComputeFireAid(Az, El, WindEnu, TargetPosEnu, TargetVelEnu, ShipPosEnu, ShipVelEnu);
+				if (Aid.bValid && Aid.MissM < Best.MissM)
+				{
+					Best.MissM = Aid.MissM;
+					Best.AzimuthDeg = static_cast<float>(Az);
+					Best.ElevationDeg = static_cast<float>(El);
+					Best.bValid = true;
+				}
 			}
 		}
+	};
+	Scan(CenterAz - 25.0, CenterAz + 25.0, 6.0, 4.0, 70.0, 6.0);  // coarse: ~9 × 12
+	if (Best.bValid)
+	{
+		const double CAz = Best.AzimuthDeg;
+		const double CEl = Best.ElevationDeg;
+		Scan(CAz - 5.0, CAz + 5.0, 1.5, FMath::Max(4.0, CEl - 5.0), FMath::Min(70.0, CEl + 5.0),
+		     1.5);  // fine: ~7 × 7 around the coarse best
 	}
 	return Best;
 }
