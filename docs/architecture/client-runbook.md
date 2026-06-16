@@ -30,9 +30,11 @@
 
 | 단계 | 도구 | 출력 | 비고 |
 |---|---|---|---|
-| 0 | `tools/assets/*.py` (Blender bpy) | FBX + 프리뷰 렌더 | LOD가 생성기 파라미터 |
+| 0 | `tools/assets/*.py` (Blender bpy) | FBX + 프리뷰 렌더 | LOD가 생성기 파라미터. frigate=함선 지오메트리(레이더면·마스트·CIWS·난간 등 디테일) |
+| 0b | `tools/assets/textures.py` (numpy/PIL) | 절차적 PBR 디테일맵 + 스프라이트(`out/textures/*.png`) | 타일 노멀+RAO(패널/웨더링) · T_Smoke/T_Flash(연기/머즐 스프라이트). 결정론 시드 |
 | 1 | `Tools/import_assets.py` | `Content/.../Meshes/SM_*` | LOD 체인 조립 포함 |
-| 2 | `Tools/setup_materials.py` | 머티리얼 9종 + 메시 슬롯 할당 | 재실행 = 전부 재생성 |
+| 1b | `Tools/import_textures.py` | `Content/.../Textures/T_*` | 노멀/마스크/스프라이트 압축·sRGB 설정. 머티리얼이 트라이플래너로 샘플 |
+| 2 | `Tools/setup_materials.py` | 머티리얼 15종(트라이플래너 PBR 디테일·부위별 슬롯 할당·연기 빌보드 퍼프·머즐 스프라이트 포함) | 재실행 = 전부 재생성. 순서: assets→textures→import_assets→import_textures→materials |
 | 3 | `Tools/setup_level.py` | `L_Range` 전체 재생성 | **파괴적**, 워터 settle 30 s |
 | 4 | `Tools/patch_level.py` | 기존 레벨 인플레이스 패치 | 멱등, 3의 재생성 회피용 |
 
@@ -75,6 +77,7 @@ HUD가 비어 보인다 — 버그가 아니라 게이팅 동작).
 | `-SeaTestBurst` | 합성 기폭+물기둥 1회 (비주얼 QA를 교전 운에서 분리) | SeaWorldManager |
 | `-SeaQuit=초` | **스크린샷 없이** 종료 — 계측 전용 (§5) | GameMode |
 | `-SeaStat=gpu\|unit\|...` | stat 표시 토글 (`-ExecCmds="stat ..."`는 -game에서 무효) | GameMode |
+| `-SeaProfileGPU=초` | 워밍업 후 ProfileGPU 1회를 **로그로** 덤프(패스별 GPU ms — 오버레이/스크린샷 판독 불필요). `-SeaQuit`와 병용, `perf_capture.sh --gpu`가 사용 | GameMode |
 | `-SeaGamePlay` | 생존 게임 자동 사수: 탄착예측기로 요격해를 풀어 추적·사격(웨이브 진행). 마우스 없이 게임 루프를 캡처 검증 | PlayerController |
 | `-SeaManualPlay` | **사람 입력 경로** 검증용 자동 사수: 실제 마우스룩(Turn/LookUp)·Fire() 핸들러를 구동하고 화면 SOLUTION(탄착=리드)에서만 발사 — "HUD만으로 사람이 맞출 수 있는가" 검증 | PlayerController |
 | `-SeaShotSeq=초` | 지정 간격마다 함교 시점 스크린샷(게임 루프 필름스트립), `-SeaShotSeqQuit=초`(기본 42)에 종료 | GameMode |
@@ -120,21 +123,51 @@ HUD가 비어 보인다 — 버그가 아니라 게이팅 동작).
 4. 에디터 오프스크린 캡처(`Tools/capture_level.py`, SceneCapture2D)는 레벨 검수용 —
    워터 인포 등 **실 파이프라인 검증은 반드시 인게임**(-game) 캡처로 한다
    (unattended 에디터는 뷰포트를 렌더하지 않아 HighResShot이 항상 검정).
+5. **프레임 예산 판정으로 마감**: 시각이 OK면 `perf_capture.sh --gpu`(§5)로 1440p60
+   PASS/FLAG를 확인한다 — 비주얼을 바꾸는 변경(머티리얼·LOD·라이팅)은 거의 항상 GPU
+   비용을 건드리므로, 캡처 루프는 "보기 좋은가 + 예산 안에 드는가" 둘 다로 닫는다.
 
-## 5. 성능 계측 절차
+## 5. 성능 계측 절차 (자동 — 매 인게임 테스트의 마지막 단계)
 
-- **측정 런은 `-SeaQuit`로 끝낸다.** `-SeaShot`의 스크린샷 GPU 리드백 자체가
-  ~400 ms 프레임이라 max/avg를 오염시킨다(원인 격리 이력: client-design §8).
-  카메라 구도는 `-SeaShot=999 -SeaQuit=55`처럼 조합하면 "카메라만 설정, 촬영 없음".
-- 프레임 통계는 SeaWorldManager가 EndPlay에 로그(steady-state: 첫 8 s 워밍업 제외,
-  100 ms 초과 프레임은 타임스탬프와 함께 별도 로그 — 히치의 *시각*이 원인 격리의
-  핵심이다). 로그 수집: 에디터 -game은 `-abslog=경로`, 패키징 빌드는 stdout.
-- GPU 내역은 `-SeaStat=gpu` + `-SeaShot` 캡처로 판독한다.
-- **vsync 주의 2건**: ① 60 Hz 락 환경에서 평균 16.67 ms는 "정확히 60 fps"라는 뜻 —
-  품질군 비교는 평균이 아니라 over-budget 비율/stat gpu로. ② `r.VSync=0`은 macOS
-  Metal 윈도우드에서 즉시 present 경로가 오히려 느려(23 ms대) 헤드룸 측정에
-  부적합 — vsync-on(출하 구성)이 측정 기준.
-- scalability 스위치: `-dpcvars="sg.PostProcessQuality=0,..."` (sg.* 10종).
+**모든 인게임 테스트는 프레임 판정으로 끝낸다.** `perf_capture.sh` 한 줄이 측정 런을
+돌리고 1440p60 예산 대비 **PASS / MARGIN / FLAG** 판정을 출력한다 — "최적화 진행 여부"를
+캡처 루프에 내장한 것(§4 4번):
+
+```sh
+client/SeaShield/Tools/perf_capture.sh --gpu          # 게임 부하, 네이티브 1440p, GPU 패스 내역
+client/SeaShield/Tools/perf_capture.sh --idle --gpu   # 정적 씬(워터/스카이/클라우드 격리)
+client/SeaShield/Tools/perf_summary.sh <기존 -abslog>  # 임의 -game 로그를 사후 판정
+```
+
+- 동작: 서버 **세션 분리** 기동 → 에디터 `-game -SeaGamePlay -SeaQuit -abslog`(스크린샷
+  없음) → `perf_summary.sh`가 `PERF:`/`Hitch:`/ProfileGPU를 파싱해 판정. 옵션: `--dur`(기본
+  30, ≥12 필요), `--res`, `--idle`, `--gpu`, `--port`, `--cvars`(=`-dpcvars` 패스스루 — 워터
+  비용 노브 실험용).
+- **판정 게이트(중요)**: vsync 환경에서 프레임 DeltaTime은 16.667 ms 주기로 지터한다 →
+  정상 60 fps도 ~40%가 16.7 ms를 살짝 넘게 찍히므로 **over-16.7%는 참고용**. 진짜 "60 미스"는
+  한 vsync를 통째로 놓쳐 ~33 ms로 떨어진 프레임 = **over-33.3%**와 **p99**로 본다. 절대
+  헤드룸은 ProfileGPU의 **GPU 프레임 ms**(vsync 무관).
+- **프레임 통계 출처**: `ASeaWorldManager`가 EndPlay에 `PERF:` 한 줄(frames/avg/p95/p99/max/
+  over16.7/over33.3, 첫 8 s 워밍업 제외) + >100 ms 히치는 타임스탬프와 함께 로그. >60 steady
+  프레임이 있어야 출력되므로 측정 런은 `--dur` 큰 값으로.
+- **GPU 패스 내역**: `--gpu`(=`-SeaProfileGPU`)가 ProfileGPU를 **로그로** 덤프 →
+  `perf_summary.sh`가 상위 패스(ms)를 출력. 스크린샷 오버레이 판독 불필요(단발 오버레이는
+  여전히 `-SeaStat=gpu`로 가능).
+- **측정 런은 절대 스크린샷을 찍지 않는다**(`-SeaQuit`): `-SeaShot`의 GPU 리드백이 ~400 ms
+  프레임이라 max/avg를 오염시킨다(client-design §8). 시각 검수와 성능 계측은 분리한다.
+- **macOS 윈도우드 present 캡**: WindowServer가 윈도우드 -game을 60 Hz로 vsync한다(앱
+  `bUseVSync` 무관) → GPU < 16.67 ms면 자동 60 fps 고정(avg=16.67). 헤드룸은 avg가 아니라
+  GPU ms로 읽는다. `r.VSync=0`은 Metal 윈도우드에서 오히려 느려 헤드룸 측정에 부적합.
+- **열(thermal) 공정 측정 — 스윕엔 쿨다운 필수**: M4 Max GPU는 무거운 런을 연속으로 돌리면
+  throttle된다. 쿨다운 없이 80→100→90% 같은 해상도 스윕을 연달아 돌리면 avg가 **스크린%가
+  아니라 런 순서대로** 단조 증가해 비교가 뒤집힌다(인공물 — 성능 리포트 §6.4에서 실증). 노브/
+  해상도 **비교 스윕은 각 런 전 ~90 s 유휴 쿨다운**으로 측정한다. 첫 런이 가장 cool.
+- **현 목표 = ~50 fps(20 ms), 1440p 출력**(3인칭 + 무거운 바다, 품질 우선 — §6.4). 기존
+  PASS 게이트(over-33.3 < 1% && p99 ≤ 25 ms)는 60 fps 기준이라 50 fps 목표엔 **보수적 프록시**:
+  통과하면 50 fps는 자명히 확보. 내부 해상도는 `r.ScreenPercentage=90`(TSR→1440p)로 굽혀 있다.
+- scalability 실험: `--cvars`/`-dpcvars=`로 `r.Water.WaterMesh.TessFactorBias`,
+  `r.VolumetricRenderTarget.Mode/Scale`, `r.ScreenPercentage`, `sg.*` 등. 확정값은
+  `DefaultEngine.ini [SystemSettings]`에 굽는다(현 워터/클라우드 예산 노브가 거기 있음).
 
 ## 6. 패키징 (BuildCookRun)
 
@@ -187,6 +220,13 @@ client/SeaShield/Tools/record_demo.sh   # 원터치: 컴파일→서버→게임
 | 라이팅 리빌드 배너 | Stationary 라이트 + 베이크 데이터 없음 | 전 라이트 Movable(완전 동적 — patch/setup_level.py) |
 | 일제사 직후 첫 VFX 히치 가능성 | 첫 드로우 시점 셰이더/PSO 컴파일 (frustum 밖 워밍업은 무효 — Metal은 그릴 때 만든다) | 부팅 시 카메라 앞 서브픽셀 스펙으로 전 교전 머티리얼 1회 드로우(WarmupVfx) |
 | 메시 치수 1/100 | FBX 단위 체인 | 생성기 `FBX_SCALE_ALL` + 임포트 치수 assert (import_assets.py) |
+| 1440p에서 7 fps, 워터가 GPU의 93% | 워터 품질 상향(tessellation 10·LODScaleBias +0.5·lod_scale 1.5)이 gerstner 쿼드트리 삼각형 폭증 → SingleLayerWater 121 ms(깊이 프리패스 40 + 드로우 81) | `r.Water.WaterMesh.TessFactorBias/-LODScaleBias/-LODCountBias`로 지오메트리 예산 축소(→~1.5 ms). 원거리 패턴 방지는 LOD가 아니라 MI_SeaOcean 머티리얼이 담당하므로 안전 (perf-report 클라 §) |
+| 네이티브가 아닌 ~60% 해상도로 렌더(흐릿) | 첫 실행 하드웨어 오토벤치가 (워터가 느릴 때) 로컬 `GameUserSettings`에 `sg.ResolutionQuality=0` 기입 → 스크린% ≈60 | `DefaultEngine.ini [SystemSettings] r.ScreenPercentage=100`(SystemSettings 우선순위가 scalability를 이김). TSR 업스케일 라인(`1552x873 -> 2560x1440`)으로 검출 |
+| 볼류메트릭 클라우드 8 ms(네이티브) | quarter-res 트레이스가 march-bound(샘플캡·섀도·AO 컷 무효) | `r.VolumetricRenderTarget.Mode=2`+`.Scale=0.5`(half-res 재구성)로 ~3 ms. 수평선 상공 구름은 불투명체와 교차 안 해 mode 2 제약 무영향 |
+| avg가 항상 16.67 ms인데 GPU는 12 ms | macOS WindowServer가 윈도우드 present를 60 Hz로 vsync(앱 vsync 설정 무관) | 헤드룸은 avg 아닌 GPU ms로 읽기(§5). over-16.7%는 vsync 지터로 부풀음 → 게이트는 over-33.3%/p99 |
+| 게임 부하 0.36 s 주기 48 ms **게임-스레드** 스파이크(GPU·렌더 정상) | `-SeaGamePlay` 자동 사수가 `ReaimTimer 0.35 s`마다 `SeaBallistics::SolveAim`(±25°×4-70° 1.5° 전수 그리드 = ~1500 RK4 적분)을 호출 — 사람 마우스 조준은 안 타는 캡처 하네스 전용 경로 | `SolveAim` coarse-to-fine(6°→±5°/1.5°) → 48→5 ms, over-33.3 0%. 스파이크 스레드/단계 귀속은 `Spike:` 포렌식 라인(game/render/reconcile/trails/vfx ms). performance-report §6.3 |
+| 일제사 중 over-33.3 1.8%, p99 35·max 55 ms(연기 트레일 재작업 후) | 연기 퍼프 **거리 기반 방출**이 `SampleTrail`→`EmitPuff`(`AStaticMeshActor` 스폰)를 **reconcile 루프 안**에서 호출 → 빠른 로켓이 프레임당 다수 액터 스폰. `Spike:`가 **reconcile 21–44 ms**로 귀속(trails 3.7·**vfx 0.0** = 연기 GPU 무죄). 오버드로 트림은 무효 | **프레임당 스폰 캡**(`kPuffMaxPerCall=2`) + 방출 간격 600→850 cm으로 버스트 상한 → p99 21·max 27·over-33.3 0%. 교훈: 퍼프 액터 스폰 비용은 vfx가 아니라 **호출 위치(reconcile) 타이밍**에 귀속. performance-report §6.6 |
+| 부력 결합 시 선체가 수면 위/아래로 떠 어긋남 | `UWaterWavesBase::GetWaveHeightAtPosition`의 `InTime`을 `GetWorld()->GetTimeSeconds()`로 주면 **렌더러가 쓰는 Water 시간과 불일치** → 질의한 파면과 렌더 파면이 다른 위상 | `UWaterSubsystem::GetWaterSubsystem(World)->GetWaterTimeSeconds()`(인스턴스 메서드, static 아님)로 질의 → 동일 위상. 보브/틸트는 `FInterpTo` 저역통과 + 틸트 ±5° 클램프(대형 함선은 평균 슬로프). 큰 파도 GPU 비용(SLW+워터메시)은 진폭으로 조절(×1.7 마진부족 → ×1.5). performance-report §6.7 |
 
 런북 갱신 규칙: 새 함정을 격리하면 **증상-원인-대응 한 줄**을 이 표에 추가하고,
 원인 격리에 쓴 실험(대조 프로브·캡처 쌍)은 해당 설계 문서에 남긴다.
