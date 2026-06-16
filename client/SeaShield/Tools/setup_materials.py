@@ -1,6 +1,8 @@
 # Procedural materials for the procedural meshes — authored as node graphs in
 # code (MaterialEditingLibrary), same discipline as the bpy generators. Run
 # like setup_level.py (full editor, -ExecCmds="py ...").
+import re
+
 import unreal
 
 MAT_DIR = "/Game/SeaShield/Materials"
@@ -155,19 +157,94 @@ def _triplanar(m, texture, world_size_cm, sampler_type, ax, ay):
     return res
 
 
-def _detail_normal(m, world_size_cm, ax, ay):
+def _macro_variation(m, ax, ay, scale=0.00035):
+    """A STATIC, large-scale (~30 m) world-space noise field, 0..1 — the anti-tiling
+    macro mask (P2-5). Reuses _panned_noise with ZERO pan (static) at a low scale (big
+    features). Used to (a) blend two baked detail variations on the hull and (b) modulate
+    per-region weathering elsewhere, so the tiling detail stops reading as a uniform repeat."""
+    return _panned_noise(m, scale, (0.0, 0.0, 0.0), 0.0, 1.0, ax=ax, ay=ay)
+
+
+def _detail_normal(m, world_size_cm, ax, ay, tex="T_ShipDetail_N"):
     """Triplanar detail normal (panel/plate/weld relief) -> normalized tangent
     normal for MP_NORMAL."""
-    blended = _triplanar(m, _detail_tex("T_ShipDetail_N"), world_size_cm,
+    blended = _triplanar(m, _detail_tex(tex), world_size_cm,
                          unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL, ax, ay)
     nrm = _lib.create_material_expression(m, unreal.MaterialExpressionNormalize, ax + 460, ay)
     _lib.connect_material_expressions(blended, "", nrm, "")
     return nrm
 
 
-def _detail_rao(m, world_size_cm, ax, ay):
+def _detail_normal_db(m, coarse_cm, fine_cm, near_cm, far_cm, ax, ay, tex="T_ShipDetail_N",
+                      tex2=None, macro=None):
+    """Distance-blended triplanar detail normal: the COARSE plate/weld relief always,
+    PLUS a finer sub-panel/rivet tile faded IN as the camera approaches (PixelDepth)
+    and OUT in the distance — so close-ups gain crisp micro-detail while far hull
+    stays shimmer-free (keeps the §6.4/6.7 anti-shimmer discipline). The fine term is
+    capped so the coarse relief always dominates; lerp+normalize is the standard cheap
+    detail-normal blend. ANTI-TILING (P2-5): if tex2+macro given, the COARSE band is
+    macro-blended between two baked variations (different plate layouts per region) so
+    the plate pattern stops repeating; the fine band stays single-variation (cost)."""
+    ntex = _detail_tex(tex)
+    coarse = _triplanar(m, ntex, coarse_cm, unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL, ax, ay)
+    if tex2 is not None and macro is not None:
+        coarse2 = _triplanar(m, _detail_tex(tex2), coarse_cm,
+                             unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL, ax, ay + 2350)
+        cmix = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, ax + 250, ay)
+        _lib.connect_material_expressions(coarse, "", cmix, "A")
+        _lib.connect_material_expressions(coarse2, "", cmix, "B")
+        _lib.connect_material_expressions(macro, "", cmix, "Alpha")
+        coarse = cmix
+    fine = _triplanar(m, ntex, fine_cm, unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL, ax, ay + 1100)
+    depth = _lib.create_material_expression(m, unreal.MaterialExpressionPixelDepth, ax - 260, ay + 1900)
+    fr = _lib.create_material_expression(m, unreal.MaterialExpressionSubtract, ax - 100, ay + 1900)
+    farc = _const(m, float(far_cm), ax - 260, ay + 2040)
+    _lib.connect_material_expressions(farc, "", fr, "A")
+    _lib.connect_material_expressions(depth, "", fr, "B")
+    inv = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, ax + 60, ay + 1900)
+    span = _const(m, 1.0 / max(float(far_cm - near_cm), 1.0), ax - 100, ay + 2040)
+    _lib.connect_material_expressions(fr, "", inv, "A")
+    _lib.connect_material_expressions(span, "", inv, "B")
+    nearm = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, ax + 220, ay + 1900)
+    _lib.connect_material_expressions(inv, "", nearm, "")
+    cap = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, ax + 380, ay + 1900)
+    capk = _const(m, 0.6, ax + 220, ay + 2040)
+    _lib.connect_material_expressions(nearm, "", cap, "A")
+    _lib.connect_material_expressions(capk, "", cap, "B")
+    blend = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, ax + 560, ay + 700)
+    _lib.connect_material_expressions(coarse, "", blend, "A")
+    _lib.connect_material_expressions(fine, "", blend, "B")
+    _lib.connect_material_expressions(cap, "", blend, "Alpha")
+    nrm = _lib.create_material_expression(m, unreal.MaterialExpressionNormalize, ax + 720, ay + 700)
+    _lib.connect_material_expressions(blend, "", nrm, "")
+    return nrm
+
+
+def _waterline_wetness(m, mask_z, top_cm, power, ax, ay):
+    """0..1 wet-sheen mask: 1 at the waterline (world Z 0), fading to 0 by top_cm up
+    (Power concentrates it low). Keyed off WORLD Z (not local) so the band stays
+    pinned to the real waterline as the hull bobs/rolls on the Gerstner surface
+    (buoyancy drives the actor's world Z)."""
+    top = _const(m, float(top_cm), ax, ay + 160)
+    sub = _lib.create_material_expression(m, unreal.MaterialExpressionSubtract, ax + 140, ay)
+    _lib.connect_material_expressions(top, "", sub, "A")
+    _lib.connect_material_expressions(mask_z, "", sub, "B")
+    inv = _const(m, 1.0 / float(top_cm), ax, ay + 240)
+    mul = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, ax + 280, ay)
+    _lib.connect_material_expressions(sub, "", mul, "A")
+    _lib.connect_material_expressions(inv, "", mul, "B")
+    sat = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, ax + 420, ay)
+    _lib.connect_material_expressions(mul, "", sat, "")
+    powr = _lib.create_material_expression(m, unreal.MaterialExpressionPower, ax + 560, ay)
+    pexp = _const(m, float(power), ax + 420, ay + 160)
+    _lib.connect_material_expressions(sat, "", powr, "Base")
+    _lib.connect_material_expressions(pexp, "", powr, "Exp")
+    return powr
+
+
+def _detail_rao(m, world_size_cm, ax, ay, tex="T_ShipDetail_RAO"):
     """Triplanar packed detail: returns (rough, ao, dirt) channel masks."""
-    rao = _triplanar(m, _detail_tex("T_ShipDetail_RAO"), world_size_cm,
+    rao = _triplanar(m, _detail_tex(tex), world_size_cm,
                      unreal.MaterialSamplerType.SAMPLERTYPE_MASKS, ax, ay)
 
     def chan(r, g, b, yy):
@@ -180,6 +257,38 @@ def _detail_rao(m, world_size_cm, ax, ay):
         return mk
 
     return chan(True, False, False, ay), chan(False, True, False, ay + 60), chan(False, False, True, ay + 120)
+
+
+def _detail_rao_blend(m, world_size_cm, macro, ax, ay):
+    """ANTI-TILING (P2-5): sample TWO baked RAO variations and macro-blend each channel —
+    the rust/weathering pattern then differs per region instead of recurring every tile.
+    Returns the blended (rough, ao, dirt)."""
+    r1, a1, d1 = _detail_rao(m, world_size_cm, ax, ay, "T_ShipDetail_RAO")
+    r2, a2, d2 = _detail_rao(m, world_size_cm, ax, ay + 1700, "T_ShipDetail_RAO2")
+
+    def mix(c1, c2, yy):
+        n = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, ax + 640, yy)
+        _lib.connect_material_expressions(c1, "", n, "A")
+        _lib.connect_material_expressions(c2, "", n, "B")
+        _lib.connect_material_expressions(macro, "", n, "Alpha")
+        return n
+
+    return mix(r1, r2, ay), mix(a1, a2, ay + 60), mix(d1, d2, ay + 120)
+
+
+def _macro_modulate(m, value, macro, lo, hi, ax, ay):
+    """value * lerp(lo, hi, macro) — cheap per-region modulation (e.g. rust amount) so a
+    single tiling detail stops reading as a uniform repeat (P2-5, the non-hull parts)."""
+    amt = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, ax, ay)
+    klo = _const(m, lo, ax - 150, ay + 140)
+    khi = _const(m, hi, ax - 150, ay + 200)
+    _lib.connect_material_expressions(klo, "", amt, "A")
+    _lib.connect_material_expressions(khi, "", amt, "B")
+    _lib.connect_material_expressions(macro, "", amt, "Alpha")
+    out = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, ax + 160, ay)
+    _lib.connect_material_expressions(value, "", out, "A")
+    _lib.connect_material_expressions(amt, "", out, "B")
+    return out
 
 
 def _weathered_basecolor(m, macro, ao, dirt, ax, ay):
@@ -274,14 +383,54 @@ def make_naval_hull():
     # Triplanar PBR detail over the world-Z paint scheme: panel/plate/weld normal,
     # weathering roughness, gentle seam AO + sparse rust. 6.5 m tile = ~1.6 m plates
     # (architectural plating, not corrugation).
-    rough_d, ao_d, dirt_d = _detail_rao(m, 650.0, 700, -240)
+    # ANTI-TILING (P2-5): blend TWO baked detail variations by a large-scale static macro
+    # mask so the hull's plate/weld/rust pattern differs per region instead of recurring
+    # every ~6.5 m triplanar tile (the biggest "CG repeat" tell up close).
+    macro = _macro_variation(m, -1750, -700)
+    rough_d, ao_d, dirt_d = _detail_rao_blend(m, 650.0, macro, 700, -240)
+    # Strengthen the regional weathering: real warships rust/stain UNEVENLY (streaks below
+    # fittings, salt-faded patches) — push the rust hard by region so the hull looks
+    # lived-in, not a uniform clean coat. This both de-tiles and adds the realism the
+    # uniform tiling lacked (the visible payoff of the macro mask).
+    dirt_d = _macro_modulate(m, dirt_d, macro, 0.25, 1.85, 1360, -440)
     base = _weathered_basecolor(m, lerp2, ao_d, dirt_d, 1600, -240)
-    _lib.connect_material_property(base, "", unreal.MaterialProperty.MP_BASE_COLOR)
     rough = _roughness_from_detail(m, 0.55, rough_d, 1600, 240)
-    _lib.connect_material_property(rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
+
+    # Waterline wetness: a wet-sheen band pinned to the real waterline (world Z 0,
+    # so it tracks the hull as buoyancy bobs/rolls it). Where wet, the paint goes
+    # DARKER (water-soaked) and far GLOSSIER (low roughness) — the single biggest
+    # "real ship on real water" tell, and it reads hardest at the low/grazing camera.
+    wet = _waterline_wetness(m, mask_z, 260.0, 1.7, 2150, 560)
+    dry_tint = _const3(m, 1.0, 1.0, 1.0, 2150, 980)
+    wet_tint = _const3(m, 0.60, 0.62, 0.64, 2150, 1040)  # wet paint darkens ~0.6x
+    tint = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, 2320, 940)
+    _lib.connect_material_expressions(dry_tint, "", tint, "A")
+    _lib.connect_material_expressions(wet_tint, "", tint, "B")
+    _lib.connect_material_expressions(wet, "", tint, "Alpha")
+    base_wet = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, 2480, 0)
+    _lib.connect_material_expressions(base, "", base_wet, "A")
+    _lib.connect_material_expressions(tint, "", base_wet, "B")
+    _lib.connect_material_property(base_wet, "", unreal.MaterialProperty.MP_BASE_COLOR)
+
+    wet_amt = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, 2320, 300)
+    wet_k = _const(m, 0.85, 2150, 360)  # how far toward fully-wet the roughness drops
+    _lib.connect_material_expressions(wet, "", wet_amt, "A")
+    _lib.connect_material_expressions(wet_k, "", wet_amt, "B")
+    rough_wet = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, 2480, 240)
+    wet_rough = _const(m, 0.09, 2320, 460)  # wet metal is near-mirror
+    _lib.connect_material_expressions(rough, "", rough_wet, "A")
+    _lib.connect_material_expressions(wet_rough, "", rough_wet, "B")
+    _lib.connect_material_expressions(wet_amt, "", rough_wet, "Alpha")
+    _lib.connect_material_property(rough_wet, "", unreal.MaterialProperty.MP_ROUGHNESS)
+
     metal = _const(m, 0.0, 1600, 420)  # painted hull is a dielectric
     _lib.connect_material_property(metal, "", unreal.MaterialProperty.MP_METALLIC)
-    nrm = _detail_normal(m, 650.0, 700, 560)
+    # Coarse plate relief everywhere + a finer sub-panel tile that fades in within
+    # ~140 m (PixelDepth) for crisp close-up detail without far-field shimmer. The COARSE
+    # band is macro-blended between the two baked variations (P2-5) so the plate layout
+    # de-tiles; the fine band stays single-variation (keeps the cost down).
+    nrm = _detail_normal_db(m, 650.0, 175.0, 2000.0, 14000.0, 700, 560,
+                            tex2="T_ShipDetail_N2", macro=macro)
     _lib.connect_material_property(nrm, "", unreal.MaterialProperty.MP_NORMAL)
 
     _lib.recompile_material(m)
@@ -296,6 +445,11 @@ def make_detailed(name, rgb, base_rough, metallic, tile_cm=300.0):
     m = _new_material(name)
     macro = _const3(m, *rgb, -1100, -240)
     rough_d, ao_d, dirt_d = _detail_rao(m, tile_cm, 200, -240)
+    # ANTI-TILING (P2-5, cheap path): modulate the rust/dirt per region by a static macro
+    # noise so the single tiling detail stops reading as a uniform repeat. (The hull uses
+    # the fuller 2-variation blend; these smaller parts get the cheap 1-sample macro.)
+    macrovar = _macro_variation(m, -1100, 760)
+    dirt_d = _macro_modulate(m, dirt_d, macrovar, 0.25, 1.8, -680, 760)
     base = _weathered_basecolor(m, macro, ao_d, dirt_d, 1100, -240)
     _lib.connect_material_property(base, "", unreal.MaterialProperty.MP_BASE_COLOR)
     rough = _roughness_from_detail(m, base_rough, rough_d, 1100, 240)
@@ -523,6 +677,10 @@ def make_far_ocean():
     sea-surface average so the seam reads as distance, not a material edge;
     low roughness keeps the sun glint walking out to the horizon."""
     m = _new_material("M_FarOcean")
+    # The water zone assigns this as its far-distance mesh material, which REQUIRES
+    # the "Used with Water" usage flag — without it UE silently falls back to the
+    # default material in-game (the far ring renders wrong) and warns every launch.
+    m.set_editor_property("used_with_water", True)
     color = _const3(m, 0.012, 0.032, 0.045, -450, 0)
     _lib.connect_material_property(color, "", unreal.MaterialProperty.MP_BASE_COLOR)
     rough = _const(m, 0.15, -450, 220)
@@ -534,10 +692,10 @@ def make_far_ocean():
     return m
 
 
-def _ocean_instance(name, parent_path, overrides):
-    """A Material Instance of a Water-plugin ocean material with scalar overrides
-    — inherits the plugin's waves/depth-color/foam/Gerstner wiring unchanged and
-    only retunes the named scalars."""
+def _ocean_instance(name, parent_path, overrides, vec_overrides=None):
+    """A Material Instance of a Water-plugin ocean material with scalar (+ optional
+    vector) overrides — inherits the plugin's waves/depth-color/foam/Gerstner wiring
+    unchanged and only retunes the named parameters."""
     tools = unreal.AssetToolsHelpers.get_asset_tools()
     path = f"{MAT_DIR}/{name}"
     if unreal.EditorAssetLibrary.does_asset_exist(path):
@@ -551,6 +709,8 @@ def _ocean_instance(name, parent_path, overrides):
     mi.set_editor_property("parent", parent)
     for key, value in overrides.items():
         _lib.set_material_instance_scalar_parameter_value(mi, key, value)
+    for key, (r, g, b) in (vec_overrides or {}).items():
+        _lib.set_material_instance_vector_parameter_value(mi, key, unreal.LinearColor(r, g, b, 1.0))
     unreal.EditorAssetLibrary.save_loaded_asset(mi)
     return mi
 
@@ -570,6 +730,11 @@ def make_sea_ocean():
         "Far Normal Fresnel Power": 14.0,          # 9.0 — fade far normal at the horizon
         "Water Roughness": 0.06,                   # 0.02 — specular AA (Lumen-safe floor)
         "Water Fresnel Roughness": 0.14,           # 0.10 — calmer grazing-angle glint
+        # P2-2: NEAR-band wave relief sharper for close-camera detail + a tighter sun
+        # glint (the near band was left at stock; only the DISTANT band was flattened).
+        # Anti-shimmer is the DISTANT band's job, so a stronger NEAR band is safe (probed
+        # default 0.25).
+        "Default Near Normal Strength": 0.42,      # 0.25 — crisper near crests/relief
         # Crest foam / whitecaps: bring the EXISTING Gerstner crests to life with
         # foam streaks WITHOUT raising wave amplitude (keeps the anti-shimmer + perf).
         # Param names from the Water_Material_Ocean probe.
@@ -578,9 +743,18 @@ def make_sea_ocean():
         "Height Bias": 0.24,                       # lower threshold -> foam on more crests
         "FoamContrast": 0.45,
     }
-    _ocean_instance("MI_SeaOcean", "/Water/Materials/WaterSurface/Water_Material_Ocean", overrides)
+    # P2-2: subtle sub-surface scatter tint (probed default white (1,1,1)) — a gentle
+    # teal so the water reads with translucent DEPTH, not a flat sheet. Depth COLOR still
+    # comes from the untouched Absorption (10,150,350); this only tints the scatter. Kept
+    # subtle to avoid a murky/green regression — verified by capture, reverted if it reads off.
+    vec_overrides = {
+        "Scattering": (0.62, 0.95, 0.86),
+    }
+    _ocean_instance("MI_SeaOcean", "/Water/Materials/WaterSurface/Water_Material_Ocean",
+                    overrides, vec_overrides)
     _ocean_instance(
-        "MI_SeaOceanLOD", "/Water/Materials/WaterSurface/LODs/Water_Material_Ocean_LOD", overrides
+        "MI_SeaOceanLOD", "/Water/Materials/WaterSurface/LODs/Water_Material_Ocean_LOD",
+        overrides, vec_overrides
     )
 
 
@@ -643,9 +817,26 @@ def make_burst():
     _lib.connect_material_expressions(o3, "", osat, "")
     _lib.connect_material_property(osat, "", unreal.MaterialProperty.MP_OPACITY)
 
+    # NOTE: a heat-haze refraction (per-pixel IOR wobble -> MP_REFRACTION) was tried here
+    # for a hot-air shimmer around the fireball, but on this Metal/unlit-translucent path
+    # it produced no confirmable distortion in close synthetic-burst captures (the hot
+    # window is also too brief + intercepts too distant to ever read it). Removed rather
+    # than ship an unverified effect — see perf-report §6.10 / task P2-3b for a future
+    # validated retry (correct refraction_method + possibly a lit/translucent variant).
+
     _lib.recompile_material(m)
     unreal.EditorAssetLibrary.save_loaded_asset(m)
     return m
+
+
+def _instance_age(m, x, y):
+    """Per-instance Age (0..1) from custom-data slot 0 — drives the particle's age
+    fade now that puffs/debris/flashes draw through an InstancedStaticMeshComponent
+    (SeaWorldManager writes SetCustomDataValue(i, 0, AgeFrac) per instance). Replaces
+    the old per-actor 'Age' ScalarParameter; the downstream graph is unchanged."""
+    node = _lib.create_material_expression(m, unreal.MaterialExpressionPerInstanceCustomData, x, y)
+    node.set_editor_property("data_index", 0)  # custom-data slot 0 = Age (default 0 when unset)
+    return node
 
 
 def make_rocket_smoke():
@@ -659,10 +850,9 @@ def make_rocket_smoke():
     m.set_editor_property("translucency_lighting_mode",
                           unreal.TranslucencyLightingMode.TLM_VOLUMETRIC_NON_DIRECTIONAL)
     m.set_editor_property("two_sided", True)
+    m.set_editor_property("used_with_instanced_static_meshes", True)
 
-    age = _lib.create_material_expression(m, unreal.MaterialExpressionScalarParameter, -1100, 500)
-    age.set_editor_property("parameter_name", "Age")
-    age.set_editor_property("default_value", 0.0)
+    age = _instance_age(m, -1100, 500)
     tex = _lib.create_material_expression(m, unreal.MaterialExpressionTextureSample, -900, -220)
     tex.set_editor_property("texture", _detail_tex("T_Smoke"))
     tex.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_COLOR)
@@ -727,10 +917,9 @@ def make_muzzle():
     m.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
     m.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
     m.set_editor_property("two_sided", True)
+    m.set_editor_property("used_with_instanced_static_meshes", True)
 
-    age = _lib.create_material_expression(m, unreal.MaterialExpressionScalarParameter, -1000, 300)
-    age.set_editor_property("parameter_name", "Age")
-    age.set_editor_property("default_value", 0.0)
+    age = _instance_age(m, -1000, 300)
     ageinv = _lib.create_material_expression(m, unreal.MaterialExpressionOneMinus, -820, 300)
     _lib.connect_material_expressions(age, "", ageinv, "")
 
@@ -766,10 +955,9 @@ def make_debris():
     m.set_editor_property("blend_mode", unreal.BlendMode.BLEND_ADDITIVE)
     m.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
     m.set_editor_property("two_sided", True)
+    m.set_editor_property("used_with_instanced_static_meshes", True)
 
-    age = _lib.create_material_expression(m, unreal.MaterialExpressionScalarParameter, -1000, 300)
-    age.set_editor_property("parameter_name", "Age")
-    age.set_editor_property("default_value", 0.0)
+    age = _instance_age(m, -1000, 300)
     ageinv = _lib.create_material_expression(m, unreal.MaterialExpressionOneMinus, -820, 300)
     _lib.connect_material_expressions(age, "", ageinv, "")
 
@@ -886,7 +1074,12 @@ def assign_by_slot(mesh_name, slot_map, default):
     slots = mesh.static_materials
     for i in range(len(slots)):
         name = str(slots[i].get_editor_property("imported_material_slot_name"))
-        mesh.set_material(i, slot_map.get(name, default))
+        # A UE FBX REIMPORT can duplicate slots with a "_<n>" suffix when the mesh
+        # sections change (e.g. SM_Frigate -> HullGray, ..., HullGray_1, ...). Match
+        # the base name so the extra slots still get the right material instead of
+        # silently falling back to `default`.
+        base = re.sub(r"_\d+$", "", name)
+        mesh.set_material(i, slot_map.get(name) or slot_map.get(base, default))
     unreal.EditorAssetLibrary.save_loaded_asset(mesh)
     unreal.log(f"SeaShieldMaterials: {mesh_name} slots={[str(s.get_editor_property('imported_material_slot_name')) for s in slots]}")
 
