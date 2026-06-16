@@ -16,7 +16,10 @@ def _apply_grade(s):
     filmic default: glare bloom, cool-shadow / warm-highlight wheels, disciplined
     daylight exposure, soft vignette/fringe."""
     scalars = {
-        "bloom_intensity": 0.95,
+        "bloom_intensity": 1.0,                # a touch punchier so the muzzle/airburst glare blooms harder
+        "lens_flare_intensity": 0.55,          # tasteful flare off the sun glint + the bright detonations
+        "lens_flare_bokeh_size": 2.4,
+        "lens_flare_threshold": 5.0,           # only genuinely bright sources flare (sun, flash), not the sea
         "vignette_intensity": 0.36,
         "scene_fringe_intensity": 0.4,
         "auto_exposure_bias": -0.25,
@@ -36,6 +39,28 @@ def _apply_grade(s):
     for key, vec in vectors.items():
         s.set_editor_property(f"override_{key}", True)
         s.set_editor_property(key, unreal.Vector4(*vec))
+
+
+def _apply_light_shafts(light_comp):
+    """God rays: screen-space light-shaft BLOOM (the sun's glow + radiating shafts
+    when it is in frame) + light-shaft OCCLUSION (cloud/horizon-masked shafts).
+    Screen-space + only visible toward the low sun, so it lifts the atmosphere
+    without touching the frame budget elsewhere. Per-prop guarded for API drift."""
+    props = {
+        "enable_light_shaft_bloom": True,
+        "bloom_scale": 0.28,                          # radiating glow, not a lens blowout
+        "bloom_threshold": 0.18,                      # only the bright sun core seeds shafts
+        "bloom_tint": unreal.Color(255, 226, 188),    # warm golden, matches the key
+        "enable_light_shaft_occlusion": True,
+        "occlusion_mask_darkness": 0.28,              # darkness of the occluded gaps
+        "occlusion_depth_range": 240000.0,
+    }
+    for key, value in props.items():
+        try:
+            light_comp.set_editor_property(key, value)
+        except Exception as exc:  # noqa: BLE001
+            unreal.log_warning(f"SeaShieldPatch: light shaft {key} skipped ({exc})")
+    unreal.log("SeaShieldPatch: sun god rays (light-shaft bloom + occlusion)")
 
 
 def _apply_height_fog(fogc):
@@ -70,6 +95,7 @@ def main():
     sun_comp.set_editor_property("light_color", unreal.Color(255, 214, 165))
     sun_comp.set_editor_property("light_source_angle", 1.1)
     sun_comp.set_editor_property("contact_shadow_length", 0.06)
+    _apply_light_shafts(sun_comp)
     skl = by_label["SkyLight"].get_component_by_class(unreal.SkyLightComponent)
     skl.set_editor_property("cubemap_resolution", 64)
     skl.set_editor_property("intensity", 0.62)  # lower sky fill -> shadow contrast/form
@@ -119,6 +145,13 @@ def main():
     ocean = by_label.get("Ocean")
     if ocean is None:
         raise RuntimeError("missing actor Ocean")
+    # Anti-tiling (P2-5): same 32-wave count (water is the dominant GPU term — adding waves
+    # is poor fidelity-per-ms) but a WIDER 7..160 m band + bigger long swells → longer repeat
+    # period + large-scale undulation, essentially free. Mirror of setup_level.py; in-place.
+    unreal.SeaLevelSetupLibrary.assign_generated_ocean_waves(
+        ocean, 7, 32, 700.0, 16000.0, 3.0, 50.0, 40.0, 90.0, 0.42, 0.30
+    )
+    unreal.log("SeaShieldPatch: ocean waves -> 32-wave 7..160 m spectrum")
     sea = unreal.load_asset("/Game/SeaShield/Materials/MI_SeaOcean")
     sea_lod = unreal.load_asset("/Game/SeaShield/Materials/MI_SeaOceanLOD")
     if sea is None or sea_lod is None:

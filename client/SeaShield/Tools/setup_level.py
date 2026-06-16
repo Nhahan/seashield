@@ -51,6 +51,7 @@ def main():
     # Screen-space contact shadows catch the small hull/launcher contact detail the
     # cascaded shadow map is too coarse for.
     sun_comp.set_editor_property("contact_shadow_length", 0.06)
+    _apply_light_shafts(sun_comp)  # god rays (mirrored in patch_level.py)
     # Fully dynamic lighting (Lumen path): movable lights mean no baked data,
     # so the runtime never shows the "LIGHTING NEEDS TO BE REBUILT" banner.
     sun.root_component.set_editor_property("mobility", unreal.ComponentMobility.MOVABLE)
@@ -93,8 +94,13 @@ def main():
     # Seeded gerstner spectrum via C++ (the waves classes are not scriptable).
     # 32 waves across a wide 3–80 m band kill the far-field repetition the
     # stock asset shows; seed/wind become weather-driven in the K4 pass.
+    # Anti-tiling (P2-5): same 32-wave COUNT (the per-vertex eval cost is ~linear in count,
+    # and water is the dominant GPU term — so adding waves is poor fidelity-per-ms), but a
+    # WIDER 7..160 m band with bigger long swells. Spreading the same 32 waves to 160 m
+    # lengthens the Gerstner sum's repeat period (less horizon repeat) and adds large-scale
+    # open-ocean undulation — both essentially FREE (no extra waves). Amplitude modest (calm).
     if not unreal.SeaLevelSetupLibrary.assign_generated_ocean_waves(
-        ocean, 7, 32, 700.0, 9000.0, 3.0, 40.0, 40.0, 90.0, 0.42, 0.30
+        ocean, 7, 32, 700.0, 16000.0, 3.0, 50.0, 40.0, 90.0, 0.42, 0.30
     ):
         raise RuntimeError("failed to assign ocean waves")
     # The root cause of the long-chased "dead 512 m square": a scripted ocean
@@ -167,10 +173,16 @@ def main():
     for info_component in ocean.get_components_by_class(info_mesh_class):
         if "Dilated" in info_component.get_name():
             info_component.set_editor_property("hidden_in_game", True)
-    # Own-ship hull at the stage origin (the sim's ENU origin).
+    # Own-ship hull at the stage origin (the sim's ENU origin). MOVABLE: the
+    # client drives the hull pose every tick (helm + Gerstner buoyancy bob/roll),
+    # so a default (Static) StaticMeshActor would spam a per-frame "has to be
+    # 'Movable'" warning that renders as on-screen red text in captures.
     frigate = spawn(actor_subsystem, unreal.StaticMeshActor, "Frigate", location=STAGE_ORIGIN)
     frigate.static_mesh_component.set_editor_property(
         "static_mesh", unreal.load_asset("/Game/SeaShield/Meshes/SM_Frigate")
+    )
+    frigate.static_mesh_component.set_editor_property(
+        "mobility", unreal.ComponentMobility.MOVABLE
     )
 
     # Unbound post-process grade: a gentle cinematic lift over the default
@@ -194,7 +206,10 @@ def apply_grade(s):
     split, disciplined daylight exposure (narrow auto-exposure so panning sky->sea
     doesn't pump), and a soft vignette/fringe. Mirrored in patch_level.py."""
     scalars = {
-        "bloom_intensity": 0.95,               # punchier glare so the new flash/airburst bloom
+        "bloom_intensity": 1.0,                # punchier glare so the new flash/airburst bloom pops
+        "lens_flare_intensity": 0.55,          # tasteful flare off the sun glint + bright detonations
+        "lens_flare_bokeh_size": 2.4,
+        "lens_flare_threshold": 5.0,           # only genuinely bright sources flare (sun, flash)
         "vignette_intensity": 0.36,
         "scene_fringe_intensity": 0.4,
         "auto_exposure_bias": -0.25,           # a touch richer, not murky
@@ -215,6 +230,27 @@ def apply_grade(s):
     for key, vec in vectors.items():
         s.set_editor_property(f"override_{key}", True)
         s.set_editor_property(key, unreal.Vector4(*vec))
+
+
+def _apply_light_shafts(light_comp):
+    """God rays: screen-space light-shaft BLOOM (the sun's glow + radiating shafts
+    when it is in frame) + OCCLUSION (cloud/horizon-masked shafts). Screen-space +
+    only visible toward the low sun, so it lifts the atmosphere without touching the
+    frame budget elsewhere. Mirrored in patch_level.py. Per-prop guarded for API drift."""
+    props = {
+        "enable_light_shaft_bloom": True,
+        "bloom_scale": 0.28,
+        "bloom_threshold": 0.18,
+        "bloom_tint": unreal.Color(255, 226, 188),
+        "enable_light_shaft_occlusion": True,
+        "occlusion_mask_darkness": 0.28,
+        "occlusion_depth_range": 240000.0,
+    }
+    for key, value in props.items():
+        try:
+            light_comp.set_editor_property(key, value)
+        except Exception as exc:  # noqa: BLE001
+            unreal.log_warning(f"SeaShieldLevel: light shaft {key} skipped ({exc})")
 
 
 def _apply_height_fog(fogc):
