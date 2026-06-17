@@ -93,6 +93,12 @@ ASeaWorldManager::ASeaWorldManager()
 	{
 		DebrisMaterial = DebrisFinder.Object;
 	}
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> SprayFinder(
+		TEXT("/Game/SeaShield/Materials/M_Spray"));
+	if (SprayFinder.Succeeded())
+	{
+		SprayMaterial = SprayFinder.Object;
+	}
 }
 
 void ASeaWorldManager::BeginPlay()
@@ -191,6 +197,7 @@ void ASeaWorldManager::BeginPlay()
 		SmokeISM = MakeISM(SmokeMaterial);
 		DebrisISM = MakeISM(DebrisMaterial);
 		FlashISM = MakeISM(MuzzleMaterial);
+		SprayISM = MakeISM(SprayMaterial);
 	}
 
 	// Build the per-effect VFX systems now that the ISMs + materials exist. They hold
@@ -203,7 +210,7 @@ void ASeaWorldManager::BeginPlay()
 	SplashSystem = MakeUnique<FSplashSystem>(this, SplashMaterial, BurstMaterial);
 	ExplosionSystem = MakeUnique<FExplosionSystem>(this, DebrisISM, FlashISM, SplashSystem.Get(),
 	                                               TrailSystem.Get());
-	WakeSystem = MakeUnique<FWakeSystem>(this, WakeMaterial, &SurfaceSampler);
+	WakeSystem = MakeUnique<FWakeSystem>(this, WakeMaterial, SprayISM, &SurfaceSampler);
 	WakeSystem->SetShipHalfLenCm(ShipHalfLenCm);
 	WreckageSystem = MakeUnique<FWreckageSystem>(this, TargetMesh);
 

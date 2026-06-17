@@ -240,8 +240,9 @@ class FWakeSystem : public ISeaVfxSystem
 {
 public:
 	FWakeSystem(AActor* InOwner, UMaterialInterface* InWakeMaterial,
+	            UInstancedStaticMeshComponent* InSprayISM,
 	            const FSeaSurfaceSampler* InSurface)
-		: Owner(InOwner), WakeMaterial(InWakeMaterial), Surface(InSurface)
+		: Owner(InOwner), WakeMaterial(InWakeMaterial), SprayISM(InSprayISM), Surface(InSurface)
 	{
 	}
 
@@ -258,6 +259,13 @@ private:
 		double Time = 0.0;
 		float SpeedFrac = 0.0f;  // 0..1 of full-speed wake at emission.
 	};
+	struct FSpray
+	{
+		FVector SpawnPos = FVector::ZeroVector;
+		FVector Vel = FVector::ZeroVector;
+		double SpawnTime = 0.0;
+		float BaseHalfM = 0.6f;
+	};
 
 	void RebuildWake(double Now);
 	void RebuildBowWave(double Now);
@@ -265,9 +273,13 @@ private:
 	// ship pose + ShipHalfLenCm) — the disturbed water a hull always shows, faint at
 	// rest and stronger making way. Flat, surface-pinned, reuses WakeMaterial.
 	void RebuildHullFoam(double Now);
+	// Hull-waterline spray puffs: billboard ISM particles emitted where waves slap the hull.
+	void EmitSpray(double Now);
+	void UpdateSpray(double Now, const FVector& CamLoc);
 
 	AActor* Owner = nullptr;
-	UMaterialInterface* WakeMaterial = nullptr;  // non-owning -> manager UPROPERTY.
+	UMaterialInterface* WakeMaterial = nullptr;          // non-owning -> manager UPROPERTY.
+	UInstancedStaticMeshComponent* SprayISM = nullptr;  // non-owning -> manager UPROPERTY.
 	const FSeaSurfaceSampler* Surface = nullptr;
 
 	TArray<FWakePoint> WakePoints;
@@ -280,6 +292,8 @@ private:
 	float ShipHalfLenCm = 6000.0f;  // hull forward half-length (queried from bounds at BeginPlay).
 	TWeakObjectPtr<UProceduralMeshComponent> BowRibbon;
 	TWeakObjectPtr<UProceduralMeshComponent> HullFoamRibbon;
+
+	TArray<FSpray> Sprays;
 };
 
 // Falling debris on a kill — the dead hull tumbling into the sea under gravity,

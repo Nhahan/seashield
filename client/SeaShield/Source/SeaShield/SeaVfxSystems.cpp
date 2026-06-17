@@ -32,8 +32,12 @@ constexpr float kDebrisGravityCms2 = 980.0f;     // arc back down like the wreck
 constexpr double kWakeSampleIntervalS = 0.25;    // 4 Hz track, smooth enough flat.
 constexpr double kWakeLifetimeS = 7.0;           // how long foam lingers astern.
 constexpr double kWakeFullSpeedCms = 1200.0;     // speed at which the wake is full.
+constexpr double kWakeMinSpeedCms = 180.0;       // DEADZONE: below this the hull isn't "making way" —
+                                                 // suppress the astern wake + bow wave so buoyancy
+                                                 // bob/drift doesn't leave a spurious dashed trail on
+                                                 // a near-stationary ship (the collar still shows).
 constexpr double kWakeSurfaceLiftCm = 60.0;      // ride just above the sea plane.
-constexpr float kWakeHalfWidthYoungCm = 220.0f;  // ~ship beam at the stern.
+constexpr float kWakeHalfWidthYoungCm = 430.0f;  // ~ship beam at the stern (was 220 = too narrow/thin).
 constexpr float kWakeHalfWidthOldCm = 2600.0f;   // foam spreads astern.
 // Bow wave: a foam V thrown off the bow, opening back at ~the Kelvin angle.
 constexpr float kBowWaveAngleDeg = 22.0f;        // each wing's sweep back from the bow.
@@ -46,12 +50,21 @@ constexpr int32 kBowWaveSegments = 10;           // strip resolution per wing.
 // at rest (a hull always disturbs the water it sits in) and brighter making way.
 constexpr int32 kHullFoamSegments = 36;          // ring resolution around the hull.
 constexpr float kHullFoamBeamRatio = 0.12f;      // beam half / length half (frigate L/B ~8.7).
-constexpr float kHullFoamBandCm = 320.0f;        // foam band width OUTSIDE the hull edge.
-constexpr float kHullFoamInsetCm = 70.0f;        // band starts a hair inside the edge (no gap).
-constexpr float kHullFoamBaseOp = 0.28f;         // always-on faint foam at rest.
-constexpr float kHullFoamSpeedOp = 0.55f;        // extra foam when making way.
+constexpr float kHullFoamBandCm = 560.0f;        // foam band width OUTSIDE the hull edge (was 320 — too thin to read at distance).
+constexpr float kHullFoamInsetCm = 130.0f;       // band starts inside the edge so it overlaps the hull (no waterline gap).
+constexpr float kHullFoamBaseOp = 0.0f;          // OFF: the always-on elliptical ring read as an artificial
+                                                 // white halo around the hull. The M_Ocean intersection foam
+                                                 // (SceneDepth proximity) now does the waterline wash organically.
+constexpr float kHullFoamSpeedOp = 0.22f;        // only a faint band when actually making way.
 // Buoyancy: the visual hull rides the live Gerstner surface (server owns XY/heading).
 constexpr float kBuoyancyTiltDamp = 0.26f;       // a big hull rides the AVERAGE slope, not corks.
+// Hull-waterline spray puffs: small billboard ISM particles emitted where waves slap the hull.
+constexpr double kSprayLifeS = 0.7;              // puff lifetime (seconds).
+constexpr int32 kSprayMaxAlive = 130;            // global cap (translucent overdraw budget).
+constexpr float kSprayYoungHalfM = 0.9f;         // billboard half-size at spawn (metres).
+constexpr float kSprayWaveThreshCm = 25.0f;      // wave elevation above mean needed to emit (chop, not just big crests).
+constexpr int32 kSprayEmitPoints = 20;           // points sampled around the hull ellipse per tick.
+constexpr double kSprayGravityCms2 = 981.0;      // downward acceleration (cm/s^2).
 constexpr float kBuoyancyTiltMaxDeg = 5.0f;      // clamp so it stays a stately warship roll.
 constexpr float kSeaDepthCm = 30000.0f;          // deep water for the wave query.
 // Billboard smoke puffs ride the ribbon column as sparse 3D VOLUME. Emitted by
@@ -75,6 +88,19 @@ constexpr float kPuffDriftMinCms = 160.0f;
 constexpr float kPuffDriftMaxCms = 360.0f;
 }  // namespace
 
+// The VISIBLE ocean is M_Ocean's 32-wave Gerstner sum (setup_materials._ocean_waves). Mirror that
+// EXACT spectrum here so the hull, wake, bow and hull-foam ride the surface the camera sees (the
+// Water-plugin waves are smaller and a different phase). Render-only — see SampleSeaSurface.
+namespace SeaOceanWaves
+{
+const float kWL[32]={18000.00f,15615.92f,13547.61f,11753.25f,10196.55f,8846.03f,7674.38f,6657.92f,5776.09f,5011.05f,4347.35f,3771.55f,3272.01f,2838.64f,2462.66f,2136.49f,1853.51f,1608.02f,1395.04f,1210.27f,1049.97f,910.90f,790.25f,685.59f,594.78f,516.00f,447.66f,388.37f,336.93f,292.30f,253.59f,220.00f};
+const float kAM[32]={12.232f,11.393f,10.612f,9.884f,9.206f,8.575f,7.987f,7.439f,6.929f,6.454f,6.011f,5.599f,5.215f,4.857f,4.524f,4.214f,3.925f,3.656f,3.405f,3.172f,2.954f,2.752f,2.563f,2.387f,2.223f,2.071f,1.929f,1.797f,1.673f,1.559f,1.452f,1.352f};
+const float kDX[32]={0.80572f,0.71226f,0.73611f,0.88748f,0.91514f,0.53321f,0.90633f,0.55548f,0.96706f,0.57566f,0.62237f,0.87118f,0.29534f,0.43499f,0.81383f,0.99956f,0.97439f,0.90046f,0.57258f,0.95842f,0.89776f,0.97294f,0.45435f,0.16039f,0.99897f,0.98803f,0.40538f,0.94757f,0.66676f,0.80935f,0.48629f,0.52019f};
+const float kDY[32]={0.59230f,0.70192f,0.67686f,0.46085f,0.40315f,0.84598f,0.42258f,0.83153f,0.25455f,0.81769f,0.78272f,0.49096f,0.95539f,0.90044f,0.58110f,0.02983f,0.22488f,0.43494f,0.81985f,0.28535f,0.44047f,0.23108f,0.89082f,0.98705f,-0.04534f,-0.15426f,0.91415f,0.31956f,0.74527f,0.58733f,0.87380f,0.85405f};
+const float kQF[32]={6.7335814f,6.2718216f,5.8417273f,5.4411270f,5.0679981f,4.7204568f,4.3967484f,4.0952385f,3.8144048f,3.5528295f,3.3091919f,3.0822618f,2.8708937f,2.6740203f,2.4906476f,2.3198498f,2.1607646f,2.0125887f,1.8745741f,1.7460240f,1.6262892f,1.5147654f,1.4108893f,1.3141367f,1.2240189f,1.1400810f,1.0618992f,0.9890787f,0.9212520f,0.8580765f,0.7992334f,0.7444254f};
+const float kSP[32]={0.58518f,0.62826f,0.67452f,0.72418f,0.77750f,0.83474f,0.89620f,0.96218f,1.03302f,1.10907f,1.19073f,1.27839f,1.37252f,1.47357f,1.58206f,1.69853f,1.82359f,1.95785f,2.10200f,2.25675f,2.42291f,2.60129f,2.79281f,2.99843f,3.21919f,3.45620f,3.71066f,3.98385f,4.27716f,4.59207f,4.93016f,5.29314f};
+}  // namespace SeaOceanWaves
+
 // ============================ FSeaSurfaceSampler ============================
 
 void FSeaSurfaceSampler::SampleSeaSurface(const FVector& WorldXY, float& OutHeightCm,
@@ -86,22 +112,27 @@ void FSeaSurfaceSampler::SampleSeaSurface(const FVector& WorldXY, float& OutHeig
 	{
 		return;
 	}
-	const UWaterWavesBase* Waves = Ocean->GetWaterWaves();
-	if (Waves == nullptr)
-	{
-		return;
-	}
-	// The renderer animates the Gerstner waves off the Water subsystem clock; query with
-	// the SAME time so the hull rides the surface it actually sees (not a phantom phase).
-	float Time = 0.0f;
+	// Sample the M_Ocean Gerstner spectrum (SeaOceanWaves) on the SAME game-time clock the material's
+	// WPO uses, so the hull, wake, bow and hull-foam ride the surface the camera actually sees (the
+	// plugin's own waves are smaller and a different phase). Render-only: buoyancy/wake are purely
+	// visual and the server /sim/ never reads the water -> determinism/golden are unaffected.
 	UWorld* World = Owner != nullptr ? Owner->GetWorld() : nullptr;
-	if (UWaterSubsystem* WaterSub = UWaterSubsystem::GetWaterSubsystem(World))
+	const double T = World != nullptr ? World->GetTimeSeconds() : 0.0;
+	const double X = WorldXY.X, Y = WorldXY.Y;
+	double H = 0.0, Nx = 0.0, Ny = 0.0, Jz = 0.0;
+	for (int i = 0; i < 32; ++i)
 	{
-		Time = WaterSub->GetWaterTimeSeconds();
+		const double k = 6.28318530718 / SeaOceanWaves::kWL[i];
+		const double ph = k * (SeaOceanWaves::kDX[i] * X + SeaOceanWaves::kDY[i] * Y) + SeaOceanWaves::kSP[i] * T;
+		const double c = FMath::Cos(ph), s = FMath::Sin(ph);
+		const double wa = k * SeaOceanWaves::kAM[i];
+		H  += SeaOceanWaves::kAM[i] * s;
+		Nx += -SeaOceanWaves::kDX[i] * wa * c;
+		Ny += -SeaOceanWaves::kDY[i] * wa * c;
+		Jz += SeaOceanWaves::kQF[i] * wa * s;
 	}
-	const FVector QueryPos(WorldXY.X, WorldXY.Y, SeaWorldFrame::Origin.Z);
-	FVector Normal = FVector::UpVector;
-	OutHeightCm = Waves->GetWaveHeightAtPosition(QueryPos, kSeaDepthCm, Time, Normal);
+	OutHeightCm = static_cast<float>(H);
+	FVector Normal(Nx, Ny, 1.0 - Jz);
 	// Damped + clamped tilt from the surface normal: a long hull rides the mean slope,
 	// it doesn't snap flat to every crest like a cork.
 	Normal = Normal.GetSafeNormal();
@@ -711,13 +742,21 @@ void FWakeSystem::Tick(const FSeaVfxContext& Ctx)
 	RebuildWake(Ctx.Now);
 	RebuildBowWave(Ctx.Now);
 	RebuildHullFoam(Ctx.Now);
+	EmitSpray(Ctx.Now);
+	UpdateSpray(Ctx.Now, Ctx.CamLoc);
 }
 
 void FWakeSystem::SampleWake(const FVector& ShipStage, const FVector& VelCms, double Now)
 {
 	const float Speed2D = static_cast<float>(VelCms.Size2D());
+	// Deadzone: a near-stationary hull (buoyancy bob/drift only) makes no wake or bow wave; remap
+	// so foam starts at kWakeMinSpeedCms, not at the first cm/s of wave-induced jitter.
 	const float SpeedFrac =
-	    FMath::Clamp(Speed2D / static_cast<float>(kWakeFullSpeedCms), 0.0f, 1.0f);
+	    Speed2D < static_cast<float>(kWakeMinSpeedCms)
+	        ? 0.0f
+	        : FMath::Clamp(static_cast<float>((Speed2D - kWakeMinSpeedCms) /
+	                                          (kWakeFullSpeedCms - kWakeMinSpeedCms)),
+	                       0.0f, 1.0f);
 	// Refresh the current ship pose EVERY frame (the bow wave is rebuilt from it),
 	// even on frames where the astern-wake point recording is throttled below.
 	LastShipSea = FVector(ShipStage.X, ShipStage.Y, SeaWorldFrame::Origin.Z + kWakeSurfaceLiftCm);
@@ -799,8 +838,13 @@ void FWakeSystem::RebuildWake(double Now)
 			Side = FVector::RightVector;
 		}
 		const float HalfWidth = FMath::Lerp(kWakeHalfWidthYoungCm, kWakeHalfWidthOldCm, AgeAlpha);
-		// Foam fades astern; the per-point ship speed gates whether there is any.
-		const float Opacity = P.SpeedFrac * FMath::Pow(1.0f - AgeAlpha, 1.5f);
+		// Foam opacity: ZERO when stopped (deadzone -> SpeedFrac 0), but once making way it has a
+		// FLOOR so even a slow hull reads as a CLEAN CONTINUOUS wake, not faint dashes catching only
+		// the wave crests (SpeedFrac was ~0.1 at cruise -> near-invisible broken foam). Fades astern.
+		const float Opacity = (P.SpeedFrac <= 0.0f)
+		                          ? 0.0f
+		                          : FMath::Lerp(0.55f, 1.0f, P.SpeedFrac) *
+		                                FMath::Pow(1.0f - AgeAlpha, 1.5f);
 
 		// Pin each edge to the LIVE wave surface (per-vertex: a wide old wake spans
 		// different wave phases) so the foam undulates with the swell, not at mean Z.
@@ -971,6 +1015,103 @@ void FWakeSystem::RebuildHullFoam(double Now)
 
 	HullFoamRibbon->CreateMeshSection_LinearColor(0, Vertices, Triangles, /*Normals=*/{}, UVs, Colors,
 	                                              /*Tangents=*/{}, /*bCreateCollision=*/false);
+}
+
+void FWakeSystem::EmitSpray(double Now)
+{
+	if (SprayISM == nullptr || LastShipSea.IsNearlyZero())
+	{
+		return;
+	}
+	const FVector Up = FVector::UpVector;
+	const FVector Fwd = LastShipFwd;
+	const FVector Side = FVector::CrossProduct(Fwd, Up).GetSafeNormal();
+	const float LenHalf = ShipHalfLenCm;
+	const float BeamHalf = ShipHalfLenCm * kHullFoamBeamRatio;
+
+	for (int32 j = 0; j < kSprayEmitPoints; ++j)
+	{
+		const float Ang = (2.0f * PI) * (static_cast<float>(j) / kSprayEmitPoints);
+		const FVector EdgeOffset = Fwd * (FMath::Cos(Ang) * LenHalf) + Side * (FMath::Sin(Ang) * BeamHalf);
+		const FVector Edge = LastShipSea + EdgeOffset;
+
+		// Wave elevation above the mean sea surface at this hull point.
+		const float Elev = Surface->SeaSurfaceWorldZ(Edge) - static_cast<float>(SeaWorldFrame::Origin.Z);
+
+		// Bow bias: emit more spray where the hull is cutting through water.
+		const float Bow = FMath::Cos(Ang) > 0.5f ? 2.0f : 1.0f;
+
+		if (Elev > kSprayWaveThreshCm && FMath::FRand() < 0.30f * Bow &&
+		    Sprays.Num() < kSprayMaxAlive)
+		{
+			FSpray S;
+			S.SpawnPos = FVector(Edge.X, Edge.Y, Surface->SeaSurfaceWorldZ(Edge) + 30.0f);
+			// Outward radial direction in the horizontal plane.
+			FVector R = EdgeOffset;
+			R.Z = 0.0f;
+			if (!R.Normalize())
+			{
+				R = Side;
+			}
+			S.Vel = R * FMath::FRandRange(120.0f, 260.0f) +
+			        FVector::UpVector * FMath::FRandRange(280.0f, 560.0f);
+			S.BaseHalfM = FMath::FRandRange(kSprayYoungHalfM * 0.7f, kSprayYoungHalfM * 1.3f);
+			S.SpawnTime = Now;
+			const int32 Idx = SprayISM->AddInstance(
+			    FTransform(FQuat::Identity, S.SpawnPos, FVector(2.0f * S.BaseHalfM)), /*bWorldSpace=*/true);
+			Sprays.Add(S);
+			SprayISM->SetCustomDataValue(Idx, 0, 0.0f, false);
+		}
+	}
+}
+
+void FWakeSystem::UpdateSpray(double Now, const FVector& CamLoc)
+{
+	if (SprayISM == nullptr)
+	{
+		return;
+	}
+	// First pass: swap-remove expired sprays, mirroring by popping the LAST instance
+	// so Sprays[i] <-> instance i stays index-locked (same pattern as UpdatePuffs).
+	for (int32 i = Sprays.Num() - 1; i >= 0; --i)
+	{
+		const double Age = Now - Sprays[i].SpawnTime;
+		if (Age >= kSprayLifeS)
+		{
+			Sprays.RemoveAtSwap(i, 1, EAllowShrinking::No);
+			SprayISM->RemoveInstance(SprayISM->GetInstanceCount() - 1);
+		}
+	}
+	// Second pass: closed-form ballistic position + camera-facing billboard, then batch-push.
+	if (Sprays.IsEmpty())
+	{
+		return;
+	}
+	TArray<FTransform> Xforms;
+	Xforms.Reserve(Sprays.Num());
+	for (int32 i = 0; i < Sprays.Num(); ++i)
+	{
+		const FSpray& Sp = Sprays[i];
+		const double Age = Now - Sp.SpawnTime;
+		const float AgeFrac = FMath::Clamp(static_cast<float>(Age / kSprayLifeS), 0.0f, 1.0f);
+		// Closed-form ballistic: pos = spawnPos + vel*t + 0.5*g*t^2 (no per-frame dt needed).
+		const FVector Pos = Sp.SpawnPos + Sp.Vel * Age +
+		                    FVector(0.0f, 0.0f, -0.5f * static_cast<float>(kSprayGravityCms2) *
+		                                             static_cast<float>(Age * Age));
+		// Expand as it ages (same balloon pattern as smoke puffs).
+		const float S = 2.0f * Sp.BaseHalfM * (1.0f + 0.8f * AgeFrac);
+		// Camera-facing billboard: plane's +Z faces the camera (same as smoke puffs).
+		FVector ToCam = CamLoc - Pos;
+		if (!ToCam.Normalize())
+		{
+			ToCam = FVector::UpVector;
+		}
+		const FQuat Face = FRotationMatrix::MakeFromZ(ToCam).ToQuat();
+		Xforms.Add(FTransform(Face, Pos, FVector(S, S, 1.0f)));
+		SprayISM->SetCustomDataValue(i, 0, AgeFrac, false);
+	}
+	SprayISM->BatchUpdateInstancesTransforms(0, Xforms, /*bWorldSpace=*/true,
+	                                         /*bMarkRenderStateDirty=*/true, /*bTeleport=*/true);
 }
 
 // ============================ FWreckageSystem ============================

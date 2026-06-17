@@ -54,6 +54,7 @@ public:
 	UPROPERTY(EditAnywhere, Category = "SeaShield") TObjectPtr<UMaterialInterface> WakeMaterial;
 	UPROPERTY(EditAnywhere, Category = "SeaShield") TObjectPtr<UMaterialInterface> SmokeMaterial;
 	UPROPERTY(EditAnywhere, Category = "SeaShield") TObjectPtr<UMaterialInterface> DebrisMaterial;
+	UPROPERTY(EditAnywhere, Category = "SeaShield") TObjectPtr<UMaterialInterface> SprayMaterial;
 
 	// Trail tuning: the ribbon marks ONLY the fresh, coherent exhaust right behind the
 	// rocket (short-lived). The aged trail is carried by the billboard puffs, which
@@ -136,6 +137,7 @@ private:
 	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> SmokeISM;   // puffs (M_RocketSmoke)
 	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> DebrisISM;  // sparks (M_Debris)
 	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> FlashISM;   // muzzle/burst (M_Muzzle)
+	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> SprayISM;   // hull spray (M_Spray)
 	// Last seen stage position/velocity per entity — lets a kill spawn its burst +
 	// wreckage at the target's last pose and inherit its motion EVEN THOUGH reconcile
 	// may already have destroyed the actor (the kill event and the snapshot drop race
