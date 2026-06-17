@@ -26,12 +26,13 @@ PROJ="$ROOT/client/SeaShield/SeaShield.uproject"
 SHOTDIR="$ROOT/client/SeaShield/Saved/Screenshots/MacEditor"
 
 DUR=45; RESX=2560; RESY=1440; SCN=game.scn; PORT=7779; SP=0; IDLE=0
-MODE=seq; SEQ=3; SHOT=0; CAM=""
+MODE=seq; SEQ=3; SHOT=0; CAM=""; MAP=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --seq) MODE=seq; SEQ=$2; shift 2;;
     --shot) MODE=shot; SHOT=$2; shift 2;;
     --cam) CAM=$2; shift 2;;       # hero framing "X,Y,Z,Pitch,Yaw" (stage coords) for --shot
+    --map) MAP=$2; shift 2;;       # load a non-default map (e.g. /Game/SeaShield/Maps/L_RangeProbe)
     --dur) DUR=$2; shift 2;;
     --res) RESX=${2%x*}; RESY=${2#*x}; shift 2;;
     --sp) SP=$2; shift 2;;
@@ -80,7 +81,7 @@ fi
 FLAGS+=("-abslog=$ABSLOG")
 
 echo "cinematic_shot: ${RESX}x${RESY}${SP:+ sp=$SP%}  dur=${DUR}s  scenario=$SCN  mode=$MODE  -> $SHOTDIR"
-"$UE/Engine/Binaries/Mac/UnrealEditor" "$PROJ" "${FLAGS[@]}" >/tmp/seashield_cine_ue_$PORT.log 2>&1 &
+"$UE/Engine/Binaries/Mac/UnrealEditor" "$PROJ" ${MAP:+"$MAP"} "${FLAGS[@]}" >/tmp/seashield_cine_ue_$PORT.log 2>&1 &
 
 cleanup() {
   pkill -f "UnrealEditor.*$MARKER" 2>/dev/null
