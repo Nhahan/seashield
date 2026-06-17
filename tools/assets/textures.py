@@ -23,7 +23,7 @@ import os
 import numpy as np
 from PIL import Image
 
-SIZE = 1024
+SIZE = 2048  # P3-7: 2K detail maps — 2x texel density so plate/weld/weathering reads up close
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out", "textures")
 
 
@@ -140,26 +140,42 @@ def _ship_detail(seeds):
     blended in-engine by a low-freq macro mask therefore breaks the visible ~6.5 m
     triplanar tile repeat (the same rust blotch no longer recurs every tile). P2-5.
     1024 px over a 4 m tile => 256 px/m: 1 m plates, 0.25 m sub-panels."""
-    major, minor = 256, 64  # divide SIZE => seamless
-    seam_major = _seam(SIZE, major, 2)
-    seam_minor = _seam(SIZE, minor, 1)
-    # Height -> normal: subtle architectural plating, NOT corrugation.
+    # P3-7e — the dense quilted grid was PLATE DENSITY, not the weld bead: 8 major plates/texture
+    # at a 220-420 cm tile = ~0.3-0.5 m plates, far too fine (real hull plating is ~1-2 m). 4 major
+    # plates/texture => ~1 m plates at a 420 cm tile, ~1 m on the superstructure at 400 cm — clean
+    # architectural panel lines at the right density instead of a rivet/quilt field.
+    major, minor = 512, 128  # divide SIZE => seamless. 4 major plates/texture (~1 m at 420 cm)
+    # P3-7b — naval-AD read the prior bake as "soft rounded pillow / orange-peel", NOT flat:
+    # broad gentle undulation with no dead-flat plate field between the joins. Real welded warship
+    # steel is DEAD-FLAT plate + a SHARP narrow deep butt-joint recess + a THIN proud weld bead.
+    # Re-author to that: kill the broad doming (plate offsets ~0, fine high-freq tooth only) and
+    # let crisp seams carry all the signal.
+    seam_major = _seam(SIZE, major, 3)   # THIN crisp butt-joint line — a narrow groove
+    seam_minor = _seam(SIZE, minor, 2)   # hairline sub-panel
     height = np.zeros((SIZE, SIZE))
-    height += 0.10 * _plate_offsets(SIZE, major, seeds["plate"])  # plates not perfectly flush
-    height -= 0.45 * seam_major                                   # recessed plate seams
-    height -= 0.16 * seam_minor                                   # finer panel lines
-    height += 0.018 * _norm01(_seamless_fbm(SIZE, 1.5, seeds["tooth"]))  # faint micro tooth
-    normal = _height_to_normal(height, strength=1.2)
+    # P3-7e — the raised WELD-BEAD ring (P3-7c/d) framed every plate into a "button/rivet" tile,
+    # reading as over-textured/quilted at close range. Drop the bead entirely: a clean THIN
+    # recessed seam LINE on a dead-flat plate field reads as architectural PANEL LINES, not
+    # buttons. Moderate strength so the lines catch the rake without embossing the whole surface.
+    height -= 0.70 * seam_major                                  # P3-7.4: deeper plate-butt recess (0.50->0.70) so seams cast a micro-shadow under the raked key
+    height -= 0.06 * seam_minor                                  # P3-7g: fainter sub-panels (naval-AD 4: the minor grid read as a "polka-dot" tiled decal — let the major plate lines dominate)
+    height += 0.006 * _norm01(_seamless_fbm(SIZE, 0.7, seeds["tooth"]))  # FINE tooth only (sandpaper)
+    normal = _height_to_normal(height, strength=2.8)            # P3-7.4: stronger relief (2.1->2.8) — plate/weld now reads as plated steel, not soft clay (raked light is ready to exploit it)
     # Roughness / AO / dirt.
     rough = np.full((SIZE, SIZE), 0.42)                           # painted-metal base
     rough += 0.22 * (_norm01(_seamless_fbm(SIZE, 2.3, seeds["weather"])) - 0.5) * 2.0
-    rough += 0.16 * seam_major + 0.09 * seam_minor
+    rough += 0.16 * seam_major + 0.04 * seam_minor  # P3-7g: fainter minor grid (de-dot)
+    # P3-7: multi-scale weathering — a broad stain field + a finer rust octave so the grime
+    # reads at multiple distances (weathered warship, not flat paint). Direction-free (triplanar
+    # can't keep streaks vertical across faces — that belongs in a world-Z material layer).
+    # Sparse threshold keeps it from going blotchy/filthy.
     dirt = _norm01(_seamless_fbm(SIZE, 2.8, seeds["dirt"]))
-    dirt_mask = np.clip((dirt - 0.68) / 0.18, 0.0, 1.0)           # sparse rust/dirt patches
+    fine = _norm01(_seamless_fbm(SIZE, 1.9, seeds["dirt"] + 31))
+    dirt_mask = np.clip((np.clip(0.68 * dirt + 0.32 * fine, 0.0, 1.0) - 0.66) / 0.20, 0.0, 1.0)
     rough += 0.22 * dirt_mask
     rough = np.clip(rough, 0.06, 0.92)
     ao = np.ones((SIZE, SIZE))
-    ao -= 0.55 * seam_major + 0.30 * seam_minor
+    ao -= 0.55 * seam_major + 0.12 * seam_minor  # P3-7g: major plate seams dominate the AO; minor faint (de-dot)
     ao -= 0.18 * dirt_mask
     ao = np.clip(ao, 0.0, 1.0)
     return normal, np.stack([rough, ao, dirt_mask], axis=-1), dirt_mask

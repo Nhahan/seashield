@@ -151,6 +151,47 @@ def cylinder(name, radius, length, segments, location=(0, 0, 0), pitch_deg=0.0):
     return obj
 
 
+def vcylinder(name, radius, height, segments, location=(0, 0, 0), smooth=True):
+    """Capped cylinder standing vertically along +Z — radome drums, mooring bollards,
+    capstans, funnel uptakes. (`cylinder` lies along +Y; this one stands up.) Sits on
+    its base at `location`. Smooth-shaded by default so it reads round."""
+    bm = bmesh.new()
+    bmesh.ops.create_cone(
+        bm, cap_ends=True, radius1=radius, radius2=radius, depth=height, segments=segments
+    )
+    bmesh.ops.translate(bm, vec=Vector(location) + Vector((0.0, 0.0, height / 2.0)), verts=bm.verts)
+    obj = new_object(name, bm)
+    if smooth:
+        for poly in obj.data.polygons:
+            poly.use_smooth = True
+    return obj
+
+
+def dome(name, radius, segments, location=(0, 0, 0), squash=0.7):
+    """Smoothed radar/SATCOM radome: a UV-sphere clipped at the equator (lower half
+    dropped, the flat base capped), squashed in Z, standing on its base at `location`.
+    Smooth-shaded so it reads ROUND against the faceted superstructure — the rounded
+    counterpoint that keeps the stealth facets from reading as a uniform greybox."""
+    bm = bmesh.new()
+    bmesh.ops.create_uvsphere(
+        bm, u_segments=segments, v_segments=max(segments // 2, 4), radius=radius
+    )
+    lower = [v for v in bm.verts if v.co.z < -1e-4]
+    if lower:
+        bmesh.ops.delete(bm, geom=lower, context="VERTS")
+    for v in bm.verts:
+        v.co.z *= squash
+    boundary = [e for e in bm.edges if e.is_boundary]
+    if boundary:
+        bmesh.ops.holes_fill(bm, edges=boundary)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    bmesh.ops.translate(bm, vec=Vector(location), verts=bm.verts)
+    obj = new_object(name, bm)
+    for poly in obj.data.polygons:
+        poly.use_smooth = True
+    return obj
+
+
 def fin(name, outline, thickness):
     """Extrude a planar (y, z) outline into a thin radial fin along +-X."""
     bm = bmesh.new()
@@ -188,6 +229,60 @@ def join(objects, name):
     joined.name = name
     joined.data.name = name
     return joined
+
+
+def bevel_all(obj, offset=0.08, segments=1):
+    """Chamfer every edge a little so the ship reads as manufactured metal with machined
+    edges — not raw CG boxes (the single biggest 'greybox vs finished' geometry cue). A
+    small offset + clamp_overlap keeps thin greebles/railings from self-intersecting. Run
+    on the JOINED mesh; new chamfer faces stay flat (correct), original smooth flags survive."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bmesh.ops.bevel(
+        bm,
+        geom=list(bm.edges) + list(bm.verts),
+        offset=offset,
+        offset_type="OFFSET",
+        segments=segments,
+        profile=0.5,
+        affect="EDGES",
+        clamp_overlap=True,
+    )
+    bm.normal_update()
+    bm.to_mesh(obj.data)
+    bm.free()
+    return obj
+
+
+def cavity_ao(obj, cuts=1, samples=16, name="AO"):
+    """Bake ambient occlusion into a per-corner vertex-color attribute so geometry junctions
+    (block intersections, deck-edge recesses, the base of every vertical face) DARKEN by
+    occlusion — the 'cavity AO' that breaks a flat-albedo 'putty monolith' read (naval-AD). The
+    UE material multiplies base color by this vertex color. A light subdivision gives the AO a
+    gradient to fall across the big flat faces; run AFTER join+bevel, LOD0/1 only (hero cost).
+    Returns obj. Cycles AO bake to VERTEX_COLORS — geometry-only, needs no UVs."""
+    bpy.ops.object.select_all(action="DESELECT")
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    if cuts > 0:
+        bpy.ops.object.mode_set(mode="EDIT")
+        bpy.ops.mesh.select_all(action="SELECT")
+        bpy.ops.mesh.subdivide(number_cuts=cuts)
+        bpy.ops.object.mode_set(mode="OBJECT")
+    me = obj.data
+    if name not in (a.name for a in me.color_attributes):
+        me.color_attributes.new(name=name, type="BYTE_COLOR", domain="CORNER")
+    me.color_attributes.active_color = me.color_attributes[name]
+    scene = bpy.context.scene
+    scene.render.engine = "CYCLES"
+    try:
+        scene.cycles.device = "CPU"
+    except Exception:  # noqa: BLE001
+        pass
+    scene.cycles.samples = samples
+    scene.render.bake.target = "VERTEX_COLORS"
+    bpy.ops.object.bake(type="AO")
+    return obj
 
 
 def material(name, base_color, roughness=0.6, metallic=0.3):
