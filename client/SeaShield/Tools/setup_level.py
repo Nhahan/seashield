@@ -43,14 +43,22 @@ def main():
     # Low golden-hour key (pitch -16, near the horizon) — long shadows, warm raking
     # form on the hull, and the SkyAtmosphere reddens the low sun for free; the
     # dimmed SkyLight gives the cool fill (cinematic key/fill, the biggest AA lever).
-    sun = spawn(actor_subsystem, unreal.DirectionalLight, "Sun", rotation=(0.0, -16.0, 35.0))
+    # P3-7/Phase-7: rotation tuple is (roll, pitch, yaw) on this UE build (verified by
+    # get_actor_rotation). The old yaw 35 put the sun directly BEHIND the hero camera
+    # (which looks NE from the SW) = FRONTAL light = flat, no terminator on the faceted
+    # slabs (naval-AD critic #1: "paying for a cinematic rig, rendering an overcast
+    # greybox"). yaw -55 RAKES the ship from the side so the facets throw real value
+    # steps; pitch -22 lifts the key off the horizon haze. Capture-confirmed (light_rakeNW).
+    sun = spawn(actor_subsystem, unreal.DirectionalLight, "Sun", rotation=(0.0, -22.0, -55.0))
     sun_comp = sun.get_component_by_class(unreal.DirectionalLightComponent)
     sun_comp.set_editor_property("atmosphere_sun_light", True)
     sun_comp.set_editor_property("light_color", unreal.Color(255, 214, 165))  # warm golden key
-    sun_comp.set_editor_property("light_source_angle", 1.1)  # softer shadow penumbra + sun disk
+    # Sun-disk angle near the real ~0.53°: 1.1 doubled the disk into a fat blown-out blob
+    # in the god-ray shot; 0.6 keeps a DEFINED sun with only a touch of penumbra softening.
+    sun_comp.set_editor_property("light_source_angle", 0.6)
     # Screen-space contact shadows catch the small hull/launcher contact detail the
     # cascaded shadow map is too coarse for.
-    sun_comp.set_editor_property("contact_shadow_length", 0.06)
+    sun_comp.set_editor_property("contact_shadow_length", 0.10)  # P3-2: firmer contact at hull/water
     _apply_light_shafts(sun_comp)  # god rays (mirrored in patch_level.py)
     # Fully dynamic lighting (Lumen path): movable lights mean no baked data,
     # so the runtime never shows the "LIGHTING NEEDS TO BE REBUILT" banner.
@@ -63,7 +71,14 @@ def main():
     # Dial the sky ambient FILL down so the warm sun casts real shadow contrast on
     # the hull (key/fill ratio = form). Auto-exposure lifts the overall back up, so
     # lit faces stay bright while shadows deepen — the "AA vs flat" difference.
-    skl.set_editor_property("intensity", 0.62)
+    # P3-2: deeper key/fill ratio — critics read the ship as "flat / contrast-starved /
+    # ambient-flooded". Dropping the sky FILL lets the warm raking sun carve real form and
+    # catch the hull's detail normals (which were invisible under the flooded ambient).
+    skl.set_editor_property("intensity", 0.30)
+    # P3-6b: lower hemisphere kept BLACK (default). The P3-6a fill (a dim sea tone) produced a
+    # rainbow oil-slick fringe at the waterline via a grazing-angle clip/dispersion term
+    # (render-eng A/B). Water roughness (0.13) handles the dominant black-ribbon cause instead.
+    skl.set_editor_property("lower_hemisphere_is_black", True)
     # The real-time cubemap recapture re-renders sky+clouds per face — an ~18 ms
     # periodic spike at the default 128. 64 quarters the per-face cost; reflections
     # on the calm sea are too subtle to show the drop (performance-report §6.4).
@@ -100,7 +115,7 @@ def main():
     # lengthens the Gerstner sum's repeat period (less horizon repeat) and adds large-scale
     # open-ocean undulation — both essentially FREE (no extra waves). Amplitude modest (calm).
     if not unreal.SeaLevelSetupLibrary.assign_generated_ocean_waves(
-        ocean, 7, 32, 700.0, 16000.0, 3.0, 50.0, 40.0, 90.0, 0.42, 0.30
+        ocean, 7, 32, 700.0, 16000.0, 8.0, 100.0, 40.0, 90.0, 0.62, 0.30  # P3-B: moderate sea (~1 m) + sharp crests — foreground wave silhouettes break the grazing mirror (render-only)
     ):
         raise RuntimeError("failed to assign ocean waves")
     # The root cause of the long-chased "dead 512 m square": a scripted ocean
@@ -206,8 +221,8 @@ def apply_grade(s):
     split, disciplined daylight exposure (narrow auto-exposure so panning sky->sea
     doesn't pump), and a soft vignette/fringe. Mirrored in patch_level.py."""
     scalars = {
-        "bloom_intensity": 1.0,                # punchier glare so the new flash/airburst bloom pops
-        "lens_flare_intensity": 0.55,          # tasteful flare off the sun glint + bright detonations
+        "bloom_intensity": 0.62,               # P3-5: further discipline (absolute AAA bar)
+        "lens_flare_intensity": 0.45,          # P3-5: subtler flare
         "lens_flare_bokeh_size": 2.4,
         "lens_flare_threshold": 5.0,           # only genuinely bright sources flare (sun, flash)
         "vignette_intensity": 0.36,
@@ -221,7 +236,7 @@ def apply_grade(s):
         s.set_editor_property(f"override_{key}", True)
         s.set_editor_property(key, value)
     vectors = {
-        "color_saturation": (1.13, 1.13, 1.15, 1.0),
+        "color_saturation": (1.0, 1.0, 1.02, 1.0),     # P3-4: pull chroma ~12% — kill the video-gamey cyan
         "color_contrast": (1.13, 1.13, 1.13, 1.0),
         # cool shadows + warm highlights (the grounded war-film split, restrained)
         "color_offset_shadows": (-0.012, -0.002, 0.016, 0.0),
@@ -239,8 +254,8 @@ def _apply_light_shafts(light_comp):
     frame budget elsewhere. Mirrored in patch_level.py. Per-prop guarded for API drift."""
     props = {
         "enable_light_shaft_bloom": True,
-        "bloom_scale": 0.28,
-        "bloom_threshold": 0.18,
+        "bloom_scale": 0.20,       # tighter glow (was 0.28 — a frame-wide wash)
+        "bloom_threshold": 0.40,   # only the bright sun core seeds shafts (was 0.18 = whole sky)
         "bloom_tint": unreal.Color(255, 226, 188),
         "enable_light_shaft_occlusion": True,
         "occlusion_mask_darkness": 0.28,
@@ -260,9 +275,9 @@ def _apply_height_fog(fogc):
     (SkyAtmosphereAmbientContributionColorScale = white) drive the fog colour/
     brightness — physically-based, naturally cool-tinted at the horizon, no magic
     numbers. Cheap (no volumetric fog). Mirrored in patch_level.py."""
-    fogc.set_editor_property("fog_density", 0.018)
+    fogc.set_editor_property("fog_density", 0.028)        # P3-7d: a touch more horizon haze — soften the hard sea-sky seam
     fogc.set_editor_property("fog_height_falloff", 0.12)
-    fogc.set_editor_property("start_distance", 120000.0)  # cm (~1.2 km): keep near sea clear
+    fogc.set_editor_property("start_distance", 72000.0)   # P3-7d: haze builds sooner on the far water (depth/aerial perspective)
     fogc.set_editor_property("fog_max_opacity", 0.85)     # don't fully white-out the horizon
 
 
