@@ -291,10 +291,65 @@ def _macro_modulate(m, value, macro, lo, hi, ax, ay):
     return out
 
 
+def _grime_gradient(m, mask_z, dirt, span_cm, lo, hi, ax, ay):
+    """dirt * lerp(lo, hi, saturate(worldZ / span_cm)): concentrate grime toward the waterline.
+    `lo` applies near z0 (dirtiest, salt/rust weeping up from the boot-topping), `hi` by span_cm
+    up (cleaner topsides). World-Z keyed so the gradient tracks the bobbing hull — the triplanar-
+    safe stand-in for vertical weather streaks (naval-AD: 'dirtier from the waterline up')."""
+    inv = _const(m, 1.0 / float(span_cm), ax - 160, ay + 140)
+    frac0 = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, ax, ay)
+    _lib.connect_material_expressions(mask_z, "", frac0, "A")
+    _lib.connect_material_expressions(inv, "", frac0, "B")
+    frac = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, ax + 140, ay)
+    _lib.connect_material_expressions(frac0, "", frac, "")
+    gmul = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, ax + 280, ay)
+    klo = _const(m, lo, ax + 140, ay + 140)
+    khi = _const(m, hi, ax + 140, ay + 220)
+    _lib.connect_material_expressions(klo, "", gmul, "A")
+    _lib.connect_material_expressions(khi, "", gmul, "B")
+    _lib.connect_material_expressions(frac, "", gmul, "Alpha")
+    out = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, ax + 440, ay)
+    _lib.connect_material_expressions(dirt, "", out, "A")
+    _lib.connect_material_expressions(gmul, "", out, "B")
+    return out
+
+
+def _cavity_ao(m, base, floor, ax, ay):
+    """base * lerp(floor, 1, VertexColor): tempered baked cavity AO. The frigate's LOD0 carries a
+    baked AO vertex color (`frigate.cavity_ao`); only the deepest geometry recesses darken (to
+    `floor`x), open faces stay 1x — the value-break that stops the hull reading as flat 'putty'
+    (naval-AD). Meshes WITHOUT the AO vertex color read white (1) => unaffected (missile/rocket)."""
+    vc = _lib.create_material_expression(m, unreal.MaterialExpressionVertexColor, ax - 420, ay + 220)
+    # CONTRAST the baked AO so only the DEEP junctions stay dark and the broad face gradient lifts
+    # to white — pinches the AO into tight recess LINES instead of a blobby quilt (naval-AD 5: the
+    # cuts=1 bake read as soft dark dots). saturate((VC - 0.25) * 1.7): maps [0.25,0.84] -> [0,1].
+    sub = _lib.create_material_expression(m, unreal.MaterialExpressionSubtract, ax - 300, ay + 220)
+    clip = _const(m, 0.25, ax - 420, ay + 320)
+    _lib.connect_material_expressions(vc, "", sub, "A")
+    _lib.connect_material_expressions(clip, "", sub, "B")
+    scaled = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, ax - 200, ay + 220)
+    kk = _const(m, 1.7, ax - 300, ay + 320)
+    _lib.connect_material_expressions(sub, "", scaled, "A")
+    _lib.connect_material_expressions(kk, "", scaled, "B")
+    vc_c = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, ax - 100, ay + 220)
+    _lib.connect_material_expressions(scaled, "", vc_c, "")
+    lo = _const3(m, floor, floor, floor, ax - 220, ay + 360)
+    hi = _const3(m, 1.0, 1.0, 1.0, ax - 220, ay + 430)
+    remap = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, ax - 60, ay + 260)
+    _lib.connect_material_expressions(lo, "", remap, "A")
+    _lib.connect_material_expressions(hi, "", remap, "B")
+    _lib.connect_material_expressions(vc_c, "", remap, "Alpha")
+    out = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, ax + 120, ay)
+    _lib.connect_material_expressions(base, "", out, "A")
+    _lib.connect_material_expressions(remap, "", out, "B")
+    return out
+
+
 def _weathered_basecolor(m, macro, ao, dirt, ax, ay):
     """macro paint x AO (dark seams) x rust/dirt tint -> MP_BASE_COLOR input."""
     ao_term = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, ax, ay)
-    ao_lo = _const(m, 0.74, ax - 160, ay + 140)  # gentle seam darkening (not heavy grime)
+    ao_lo = _const(m, 0.62, ax - 160, ay + 140)  # P3-7g: deeper seam/recess darkening in albedo (naval-AD 4:
+    #                                               break the "putty monolith" — plate seams read as panel-line VALUE)
     ao_hi = _const(m, 1.0, ax - 160, ay + 200)
     _lib.connect_material_expressions(ao_lo, "", ao_term, "A")
     _lib.connect_material_expressions(ao_hi, "", ao_term, "B")
@@ -336,9 +391,9 @@ def make_naval_hull():
     with a black boot-topping band — the classic warship paint scheme, driven
     purely by world height so it works on any hull the generators emit."""
     m = _new_material("M_NavalHull")
-    haze = _const3(m, 0.085, 0.100, 0.110, -900, -200)
-    antifoul = _const3(m, 0.095, 0.028, 0.022, -900, 0)
-    boot = _const3(m, 0.020, 0.022, 0.025, -900, 200)
+    haze = _const3(m, 0.085, 0.097, 0.107, -900, -200)  # P3-7.3: hull MID tier pushed darker for a wider value gap vs the 0.19 superstructure (naval-AD "one flat value")
+    antifoul = _const3(m, 0.110, 0.030, 0.024, -900, 0)  # dark-red anti-fouling below the waterline
+    boot = _const3(m, 0.018, 0.020, 0.023, -900, 200)    # near-black boot-topping stripe
 
     world = _lib.create_material_expression(m, unreal.MaterialExpressionWorldPosition, -1200, 400)
     mask_z = _lib.create_material_expression(m, unreal.MaterialExpressionComponentMask, -1050, 400)
@@ -347,8 +402,8 @@ def make_naval_hull():
     mask_z.set_editor_property("b", True)
     _lib.connect_material_expressions(world, "", mask_z, "")
 
-    # below = saturate((40 - z) / 30): 1 under the boot band, 0 above it.
-    offset = _const(m, 40.0, -1050, 560)
+    # below = saturate((25 - z) / 30): 1 under the boot band, 0 above it.
+    offset = _const(m, 25.0, -1050, 560)
     sub = _lib.create_material_expression(m, unreal.MaterialExpressionSubtract, -900, 480)
     _lib.connect_material_expressions(offset, "", sub, "A")
     _lib.connect_material_expressions(mask_z, "", sub, "B")
@@ -359,8 +414,9 @@ def make_naval_hull():
     below = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, -620, 520)
     _lib.connect_material_expressions(mul, "", below, "")
 
-    # boot band = saturate((90 - z) / 25) - below: a stripe just above water.
-    offset2 = _const(m, 90.0, -1050, 760)
+    # boot band = saturate((140 - z) / 25) - below: a ~1.3 m black boot-topping stripe at the
+    # waterline (naval-AD: "the single most recognizable 'real warship' cue, and it's absent").
+    offset2 = _const(m, 175.0, -1050, 760)  # P3-7.3: taller (~1.5 m) boot-topping stripe so the waterline reads
     sub2 = _lib.create_material_expression(m, unreal.MaterialExpressionSubtract, -900, 800)
     _lib.connect_material_expressions(offset2, "", sub2, "A")
     _lib.connect_material_expressions(mask_z, "", sub2, "B")
@@ -387,12 +443,18 @@ def make_naval_hull():
     # mask so the hull's plate/weld/rust pattern differs per region instead of recurring
     # every ~6.5 m triplanar tile (the biggest "CG repeat" tell up close).
     macro = _macro_variation(m, -1750, -700)
-    rough_d, ao_d, dirt_d = _detail_rao_blend(m, 650.0, macro, 700, -240)
+    # P3-2: tighter triplanar tile (650→420 cm) ~1.5x the texel density / plating frequency so
+    # the panels read as plating up close instead of mip-blur (critics: "low-texel, flat"). The
+    # P2-5 macro/2-variation blend keeps the tighter tile from re-introducing a visible repeat.
+    rough_d, ao_d, dirt_d = _detail_rao_blend(m, 420.0, macro, 700, -240)
     # Strengthen the regional weathering: real warships rust/stain UNEVENLY (streaks below
     # fittings, salt-faded patches) — push the rust hard by region so the hull looks
     # lived-in, not a uniform clean coat. This both de-tiles and adds the realism the
     # uniform tiling lacked (the visible payoff of the macro mask).
     dirt_d = _macro_modulate(m, dirt_d, macro, 0.25, 1.85, 1360, -440)
+    # P3-7d: concentrate the grime toward the waterline (1.4x at z0 -> 0.8x up the topsides) so the
+    # hull reads lived-in (salt/rust weeping up from the boot-topping), not a uniform clean coat.
+    dirt_d = _grime_gradient(m, mask_z, dirt_d, 550.0, 1.95, 0.75, 1360, -560)  # P3-7f: push the near-waterline rust (naval-AD 3: grime was a no-op)
     base = _weathered_basecolor(m, lerp2, ao_d, dirt_d, 1600, -240)
     rough = _roughness_from_detail(m, 0.55, rough_d, 1600, 240)
 
@@ -400,9 +462,17 @@ def make_naval_hull():
     # so it tracks the hull as buoyancy bobs/rolls it). Where wet, the paint goes
     # DARKER (water-soaked) and far GLOSSIER (low roughness) — the single biggest
     # "real ship on real water" tell, and it reads hardest at the low/grazing camera.
-    wet = _waterline_wetness(m, mask_z, 260.0, 1.7, 2150, 560)
+    # P3-7/Phase-7 (naval-AD re-judge): the raking key made the hard flat waterline CUT obvious —
+    # no wet band read. Widen the soaked zone (260->400 cm up the hull) and soften the falloff
+    # (power 1.7->1.2) so a clearly darker, glossier wet band climbs the topside; the raked light
+    # is exactly what sells it now (biggest "real ship on real water" cue).
+    # P3-7.3 (naval-AD re-judge: wet band STILL not reading at 400/1.2 — it overlapped the dark
+    # boot/antifoul and only touched a thin gray strip): climb it well up the visible gray hull
+    # (400->650 cm) and darken the soak harder (0.60->0.50) so a substantial darker/glossier wet
+    # lower-hull reads under the raked key — the biggest remaining "real ship on water" cue.
+    wet = _waterline_wetness(m, mask_z, 650.0, 1.1, 2150, 560)
     dry_tint = _const3(m, 1.0, 1.0, 1.0, 2150, 980)
-    wet_tint = _const3(m, 0.60, 0.62, 0.64, 2150, 1040)  # wet paint darkens ~0.6x
+    wet_tint = _const3(m, 0.50, 0.52, 0.56, 2150, 1040)  # wet paint darkens ~0.5x (deeper soak)
     tint = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, 2320, 940)
     _lib.connect_material_expressions(dry_tint, "", tint, "A")
     _lib.connect_material_expressions(wet_tint, "", tint, "B")
@@ -410,7 +480,8 @@ def make_naval_hull():
     base_wet = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, 2480, 0)
     _lib.connect_material_expressions(base, "", base_wet, "A")
     _lib.connect_material_expressions(tint, "", base_wet, "B")
-    _lib.connect_material_property(base_wet, "", unreal.MaterialProperty.MP_BASE_COLOR)
+    base_final = _cavity_ao(m, base_wet, 0.68, 2640, 0)  # P3-A: baked cavity AO breaks the monolith
+    _lib.connect_material_property(base_final, "", unreal.MaterialProperty.MP_BASE_COLOR)
 
     wet_amt = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, 2320, 300)
     wet_k = _const(m, 0.85, 2150, 360)  # how far toward fully-wet the roughness drops
@@ -423,13 +494,18 @@ def make_naval_hull():
     _lib.connect_material_expressions(wet_amt, "", rough_wet, "Alpha")
     _lib.connect_material_property(rough_wet, "", unreal.MaterialProperty.MP_ROUGHNESS)
 
-    metal = _const(m, 0.0, 1600, 420)  # painted hull is a dielectric
+    # P3-7: painted hull is dielectric (0), but WORN/rusted areas (dirt mask) read as bare
+    # metal showing through the coating — the painted-vs-metal split the critics wanted.
+    metal = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, 1600, 420)
+    metal_k = _const(m, 0.35, 1600, 520)
+    _lib.connect_material_expressions(dirt_d, "", metal, "A")
+    _lib.connect_material_expressions(metal_k, "", metal, "B")
     _lib.connect_material_property(metal, "", unreal.MaterialProperty.MP_METALLIC)
     # Coarse plate relief everywhere + a finer sub-panel tile that fades in within
     # ~140 m (PixelDepth) for crisp close-up detail without far-field shimmer. The COARSE
     # band is macro-blended between the two baked variations (P2-5) so the plate layout
     # de-tiles; the fine band stays single-variation (keeps the cost down).
-    nrm = _detail_normal_db(m, 650.0, 175.0, 2000.0, 14000.0, 700, 560,
+    nrm = _detail_normal_db(m, 420.0, 120.0, 2000.0, 14000.0, 700, 560,
                             tex2="T_ShipDetail_N2", macro=macro)
     _lib.connect_material_property(nrm, "", unreal.MaterialProperty.MP_NORMAL)
 
@@ -451,6 +527,7 @@ def make_detailed(name, rgb, base_rough, metallic, tile_cm=300.0):
     macrovar = _macro_variation(m, -1100, 760)
     dirt_d = _macro_modulate(m, dirt_d, macrovar, 0.25, 1.8, -680, 760)
     base = _weathered_basecolor(m, macro, ao_d, dirt_d, 1100, -240)
+    base = _cavity_ao(m, base, 0.68, 1320, -240)  # P3-A: baked cavity AO (superstructure/deck monolith break)
     _lib.connect_material_property(base, "", unreal.MaterialProperty.MP_BASE_COLOR)
     rough = _roughness_from_detail(m, base_rough, rough_d, 1100, 240)
     _lib.connect_material_property(rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
@@ -681,7 +758,11 @@ def make_far_ocean():
     # the "Used with Water" usage flag — without it UE silently falls back to the
     # default material in-game (the far ring renders wrong) and warns every launch.
     m.set_editor_property("used_with_water", True)
-    color = _const3(m, 0.012, 0.032, 0.045, -450, 0)
+    # P3-1: the near-black distant sheet (0.012,0.032,0.045) was what the low-camera wave
+    # crests REFLECTED → the "black oily ribbon" smears the critics flagged, AND a hard dark
+    # horizon band. A muted sky-lit distant-sea blue-grey fixes both (crests now reflect a
+    # believable horizon, and the sea-sky seam softens toward aerial perspective).
+    color = _const3(m, 0.125, 0.165, 0.205, -450, 0)  # P3-7.2: lift again — near crests reflect a LIT horizon, calming the grazing-mirror contrast (naval-AD #2)
     _lib.connect_material_property(color, "", unreal.MaterialProperty.MP_BASE_COLOR)
     rough = _const(m, 0.15, -450, 220)
     _lib.connect_material_property(rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
@@ -725,30 +806,55 @@ def make_sea_ocean():
     instances (main + LOD) so the surface keeps the plugin's waves and depth
     color — only the far-field look changes."""
     overrides = {
-        "Default Distant Normal Strength": 0.12,   # 0.30 — flatten the far tile
-        "Default Distant Normal StrengthB": 0.09,  # 0.25
-        "Far Normal Fresnel Power": 14.0,          # 9.0 — fade far normal at the horizon
-        "Water Roughness": 0.06,                   # 0.02 — specular AA (Lumen-safe floor)
-        "Water Fresnel Roughness": 0.14,           # 0.10 — calmer grazing-angle glint
-        # P2-2: NEAR-band wave relief sharper for close-camera detail + a tighter sun
-        # glint (the near band was left at stock; only the DISTANT band was flattened).
-        # Anti-shimmer is the DISTANT band's job, so a stronger NEAR band is safe (probed
-        # default 0.25).
-        "Default Near Normal Strength": 0.42,      # 0.25 — crisper near crests/relief
+        # P2-6: the distant band was flattened so hard (0.12) that the MID-FIELD read as
+        # glassy/plastic. Lift it a notch AND push the Fresnel power so the flatten is
+        # confined to the TRUE horizon — mid-field regains wave relief, horizon stays
+        # shimmer-free (the anti-patterning lever is the Fresnel falloff, not zero normal).
+        "Default Distant Normal Strength": 0.16,   # 0.30 stock; 0.12 was too flat mid-field
+        "Default Distant Normal StrengthB": 0.12,  # 0.25 stock
+        "Far Normal Fresnel Power": 18.0,          # 14 — confine the flatten to the horizon
+        # P3-6a — render-eng root-caused the black "oily ribbon" grazing reflections as a
+        # near-MIRROR surface reflecting dark scene elements (NOT primarily SLW ray-miss).
+        # Roughening the grazing reflection scatters those rays into a soft sheen instead of a
+        # hard black streak — the single biggest cheap water win.
+        "Water Roughness": 0.15,                   # P3-7.4: nudged up — calm the raked-light grazing shards
+        "Water Fresnel Roughness": 0.38,           # P3-7.4: pushed hard (0.22->0.38) — the GRAZING-specific roughness blurs the black-white "cracked-glass" mirror shards into a soft glint field (naval-AD: last macro eyesore; SLW ceiling so calm not clear)
+        # P2-6: the near band at 0.42 broke the foreground into noisy glints that the Lumen
+        # reflection denoiser smeared into an 'oily' look. 0.34 keeps crisp near relief
+        # without over-fracturing the close reflection (probed stock default 0.25).
+        "Default Near Normal Strength": 0.60,      # P3-7g: render-eng 4 SLW go/no-go test — last cheap push at the
+        #                                            grazing mirror before the SLW-escape decision (P3-7f: 0.46) — render-eng 3:
+        #                                            the near field was 2 big smooth S-curves on glass; break
+        #                                            it into many small glints (safe now at roughness 0.13)
         # Crest foam / whitecaps: bring the EXISTING Gerstner crests to life with
         # foam streaks WITHOUT raising wave amplitude (keeps the anti-shimmer + perf).
         # Param names from the Water_Material_Ocean probe.
+        # P3-1: whitecaps READ now (critics: "zero foam, ship sits in water like a prop").
+        # Stronger boost + much lower height threshold puts foam streaks on far more crests —
+        # which also breaks up the dark crest reflections that read as smears.
         "Foam Opacity": 1.0,
-        "Foam Boost": 3.2,                         # metre-scale crests break -> whitecaps
-        "Height Bias": 0.24,                       # lower threshold -> foam on more crests
-        "FoamContrast": 0.45,
+        "Foam Boost": 5.0,                         # 3.2 — crests break into readable whitecaps
+        "Height Bias": 0.06,                       # 0.12 — foam gate lower still (sea is near-glassy)
+        # P3-7g — render-eng 3: the foam read as "thin bright specular streaks / chrome trim", not
+        # whitewater. The plugin exposes Foam Roughness — the foam was glossy. Make it MATTE (0.9)
+        # so crests read as opaque diffuse foam, and soften the rim so it's broad, not a 1-px line.
+        "Foam Roughness": 0.90,                    # matte whitewater (was glossy -> specular glint)
+        "FoamContrast": 0.24,                      # 0.34 — broader, softer foam edge
     }
     # P2-2: subtle sub-surface scatter tint (probed default white (1,1,1)) — a gentle
     # teal so the water reads with translucent DEPTH, not a flat sheet. Depth COLOR still
     # comes from the untouched Absorption (10,150,350); this only tints the scatter. Kept
     # subtle to avoid a murky/green regression — verified by capture, reverted if it reads off.
     vec_overrides = {
-        "Scattering": (0.62, 0.95, 0.86),
+        # P3-4: the bright teal scatter read as "swimming-pool", not open ocean (critics).
+        # Shift toward a muted deep blue-green (less green, dimmer) so the sea reads as deep
+        # water with a believable depth gradient instead of a uniform chroma-heavy cyan.
+        # P3-7f — render-eng 3: (0.12,0.24,0.32) over-corrected into "black glass" — the foreground
+        # had no luminous scatter FLOOR, so un-reflected grazing pixels went black. Lift the scatter
+        # to a luminous deep blue-teal (brighter than the petrol floor, still well below the old
+        # pool-cyan 0.40,0.66,0.76) so the foreground sits on lit water and the ribbons read as
+        # glints on a sea, not smears on a void. This is the highest-leverage cheap water fix.
+        "Scattering": (0.18, 0.36, 0.48),
     }
     _ocean_instance("MI_SeaOcean", "/Water/Materials/WaterSurface/Water_Material_Ocean",
                     overrides, vec_overrides)
@@ -756,6 +862,69 @@ def make_sea_ocean():
         "MI_SeaOceanLOD", "/Water/Materials/WaterSurface/LODs/Water_Material_Ocean_LOD",
         overrides, vec_overrides
     )
+
+
+# Phase-6b Path A — the param set tuned for the DEFAULT_LIT custom ocean (the SLW
+# escape). Same vocabulary as make_sea_ocean's 6a overrides, but now that the grazing
+# BLACK MIRROR is gone (DEFAULT_LIT instead of SingleLayerWater), the roughness floor
+# that 6a had to hold at 0.13 to scatter the mirror can drop — a lower roughness gives
+# the sea real specular sheen + Lumen reflection life instead of a matte sheet.
+_CUSTOM_OCEAN_OVERRIDES = {
+    # v1 washed out because DEFAULT_LIT IGNORES the SLW volumetric Absorption/Scattering
+    # depth-colour pipeline, leaving the near-white master `Water Albedo` (0.85) as a
+    # Lambertian milky sheet. Real water is a DARK body lit mostly by sky/sun REFLECTION:
+    # drop the albedo to a deep-ocean navy and keep roughness low so brightness comes from
+    # the specular sky/Lumen reflection, not a bright diffuse — restoring depth + glitter
+    # while keeping the SLW black mirror gone.
+    "Water Roughness": 0.035,               # reflective sheen (mirror gone -> safe; 6a had to hold 0.13)
+    "Water Fresnel Roughness": 0.10,
+    "Water Specular": 0.35,                 # 0.225 -> stronger sky/sun reflection (water F0)
+    "Default Near Normal Strength": 0.50,   # crisp near relief / glints
+    "Default Distant Normal Strength": 0.16,
+    "Default Distant Normal StrengthB": 0.12,
+    "Far Normal Fresnel Power": 18.0,       # confine the distant flatten to the true horizon
+    "Foam Opacity": 1.0,
+    "Foam Boost": 5.0,                      # readable whitecaps
+    "Height Bias": 0.06,
+    "Foam Roughness": 0.90,                 # matte whitewater
+    "FoamContrast": 0.24,
+}
+_CUSTOM_OCEAN_VEC_OVERRIDES = {
+    "Water Albedo": (0.012, 0.040, 0.085),  # 0.85 white -> deep-ocean navy (the v1 washout fix)
+}
+
+
+def make_sea_ocean_custom():
+    """Phase-6b Path A — the SingleLayerWater ESCAPE. [PARKED 2026-06-17 — NOT wired into
+    the live pipeline; the live ocean stays SLW MI_SeaOcean. Kept as the regeneration path
+    if the escape is revived. Run via apply_custom.py onto a throwaway map. See
+    perf-report §6.17 / memory water-slw-grazing-ceiling for why it was shelved.]
+
+    The near-camera grazing reflection reads as a smooth dark 'oily glass mirror' under SLW
+    shading; 6a proved every cheap/medium lever (roughness, scattering floor, near-normal,
+    wave steepness/amplitude) cannot break it — it is the SLW flat-plane shading hard
+    ceiling. This duplicates the Water-plugin master `Water_Material` and flips its shading
+    model OFF SingleLayerWater to DEFAULT_LIT. The probe (capture-verified) confirmed the
+    Gerstner vertex displacement (material WPO via WaterHeightMappingVS), foam and depth
+    color all SURVIVE the shading-model change, AND the grazing foreground stops collapsing
+    to black — BUT DEFAULT_LIT also bypasses the SLW volumetric Absorption/Scattering colour
+    pipeline, so the sea reads flat/washed and the master's colour params (Water Albedo etc.)
+    no longer bite. Recovering a premium look needs a from-scratch base-colour/reflection
+    graph rewrite — shelved in favour of the higher-ROI ship pass. MI_SeaOceanCustom
+    instances it with water-tuned params."""
+    src = "/Water/Materials/WaterSurface/Water_Material"
+    path = f"{MAT_DIR}/M_SeaOceanCustom"
+    if unreal.EditorAssetLibrary.does_asset_exist(path):
+        unreal.EditorAssetLibrary.delete_asset(path)
+    if not unreal.EditorAssetLibrary.duplicate_asset(src, path):
+        raise RuntimeError(f"failed to duplicate {src} -> {path}")
+    m = unreal.load_asset(path)
+    m.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_DEFAULT_LIT)
+    _lib.recompile_material(m)
+    unreal.EditorAssetLibrary.save_loaded_asset(m)
+    _ocean_instance("MI_SeaOceanCustom", path, _CUSTOM_OCEAN_OVERRIDES,
+                    _CUSTOM_OCEAN_VEC_OVERRIDES)
+    return m
 
 
 def make_burst():
@@ -1086,8 +1255,30 @@ def assign_by_slot(mesh_name, slot_map, default):
 
 def main():
     hull = make_naval_hull()
-    deck_gray = make_detailed("M_NavalGray", (0.055, 0.062, 0.068), 0.6, 0.15, tile_cm=480.0)
-    sensor_dark = make_detailed("M_SensorDark", (0.09, 0.10, 0.12), 0.35, 0.6, tile_cm=150.0)
+    # P3-7b — naval-AD: the superstructure (this material backs both DeckDark + Superstructure)
+    # read "glass-smooth" because a 480 cm plate tile shows <1 plate on a ~3-6 m deckhouse face.
+    # Tighten to 220 cm so the re-authored crisp plate/weld seams actually land on the
+    # superstructure + deck, sharing one plating language with the hull (the #1 mid-distance
+    # greybox tell). The macro dirt modulation already breaks the tighter tile's repeat.
+    # P3-7c 3-TIER VALUE SPLIT (naval-AD: "the ship is one flat gray albedo; a warship is never
+    # one value"). The superstructure was DARKER than the hull (inverted). Now: superstructure +
+    # decks = LIGHTEST haze-gray, hull = MID (make_naval_hull haze 0.10), sensors/radar/mast-array
+    # = DARKEST near-black. The value separation is what the eye reads first at distance.
+    # P3-7f — naval-AD 3: the 3-tier ORDER was right but the LIGHT-vs-MID gap (0.14 vs hull 0.10)
+    # was too small to survive the bright-sky exposure — it read as TWO tiers. Push the
+    # superstructure/deck UP to ~0.20 and cool it slightly (blue highest) for a >=0.08 absolute
+    # separation from the 0.10 hull, so the lighter haze-gray topside reads as a distinct tier.
+    deck_gray = make_detailed("M_NavalGray", (0.190, 0.205, 0.220), 0.6, 0.15, tile_cm=400.0)
+    # P3-7/Phase-7 (naval-AD re-judge, B-): SensorDark "still vanishes into the gray — nothing
+    # reads as black radar glass". Push it to genuine black glass: darker base + a LOW roughness
+    # floor so the SPY/AESA faces catch a sharp specular streak under the now-raking key, with
+    # metallic for a tinted dark mirror. This is the dominant remaining "putty monolith" tell.
+    sensor_dark = make_detailed("M_SensorDark", (0.020, 0.024, 0.032), 0.12, 0.6, tile_cm=150.0)
+    # P3-7/Phase-7.2 (naval-AD re-judge): the armament (gun house/CIWS mounts) read as
+    # "hull-colored extrusions" — weapons need their own MATERIAL FAMILY. A dark, glossy,
+    # metallic "machinery metal" tier sits BETWEEN the light hull gray (0.19) and the
+    # black-glass sensors (0.02): weapons now separate as bare gunmetal, not paint.
+    gunmetal = make_detailed("M_Gunmetal", (0.090, 0.100, 0.110), 0.30, 0.75, tile_cm=150.0)
     missile_white = make_detailed("M_MissileBody", (0.45, 0.45, 0.43), 0.38, 0.2, tile_cm=170.0)
     rocket_olive = make_detailed("M_RocketBody", (0.105, 0.115, 0.060), 0.55, 0.1, tile_cm=170.0)
     make_trail()
@@ -1103,7 +1294,7 @@ def main():
 
     assign_by_slot("SM_Frigate",
                    {"HullGray": hull, "DeckDark": deck_gray, "Superstructure": deck_gray,
-                    "SensorDark": sensor_dark}, hull)
+                    "SensorDark": sensor_dark, "Gunmetal": gunmetal}, hull)
     assign("SM_LauncherBase", deck_gray)
     assign("SM_LauncherMount", deck_gray)
     assign("SM_LauncherTubes", deck_gray)
