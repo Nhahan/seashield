@@ -414,3 +414,113 @@ ms) 내(36-seg 리본 cheap). **Part 2 4개 표면 + 시네마틱 티어 전부 
 **측정(게임 부하, 1440p, cooled):** avg 17.70 ms / **56.5 fps**, p95/p99 21/22 ms, **max 22.7 ms**, over-33.3
 **0.0%**, hitch 0 → ✅ **PASS**. (48-wave 시도 시 max 400 ms 1-회 히치는 신규 머티리얼/텍스처 **첫-렌더 셰이더
 컴파일** 1회성 — 32-wave clean 재런에서 소멸 확인. 정상.)
+
+### 6.14 정밀 디테일 패스 (Part 2-6) — 스크린샷 비평 4축 직접 해소
+
+P4 시네마틱 스샷 4장(hero·hull·godrays·combat) 엄밀 자기-비평의 4축을 직접 해소(전부 렌더 전용, 결정론/sim/서버
+무관). faceted 스텔스 아이덴티티 보존 — 헐·상부구조 각짐 유지, **장비·실린더만** 라운딩·디테일 추가.
+
+- **A 함선 지오메트리**(`frigate.py` + `asset_lib.py`): LOD0 930→2068 tris(단일 메시·드로 1회 → GPU 무시 가능).
+  (1) 실린더형 파트 선택적 스무딩(`_smooth` per-face, join 생존; 함포 배럴·helo 테일·liferaft) + 신규 `dome`/
+  `vcylinder` 프리미티브로 **둥근** CIWS/SATCOM 라돔·funnel 업테이크·capstan·bollard → "둥근 형상 부재" 해소.
+  (2) 앵귤러 그리블 밀도↑(Phalanx 건+라돔·함미 RAM 박스·windlass·RHIB+다빗). (3) **시스루 가드레일**(스탠션+
+  라이프라인, LOD0 한정) — 솔리드 벌워크 교체, 상방 deck-detail 캡처로 가독 확인. (4) 떠보이던 fwd CIWS(데크하우스
+  전방 무지지) → **브리지 지붕으로 재배치**(저각 헐 캡처로 식별·수정).
+- **B god-ray/블룸 톤다운**(`setup_level`/`patch_level`): `light_source_angle` 1.1→0.6(비대 디스크 → 정의된
+  태양), light-shaft `bloom_threshold` 0.18→0.40·`bloom_scale` 0.28→0.20, grade `bloom_intensity` 1.0→0.75
+  → 흰 splat이 정의된 광원+절제된 글로우로(**가장 큰 가시적 개선**, 클라우드 가독 회복). ProfileGPU: LightShafts
+  (Bloom) 0.23 ms·(Occlusion) 0.16 ms·Bloom 0.23 ms·LensFlare 0.22 ms = 각 ~1%(무시 가능).
+- **C 워터 mid-field/반사**(`make_sea_ocean`): `Far Normal Fresnel Power` 14→18·`Distant Normal Strength`
+  0.12→0.16/B 0.09→0.12(mid-field 릴리프 회복, 플랫튼을 수평선에 한정) + `Near Normal Strength` 0.42→0.34·
+  `Water Roughness` 0.06→0.075(근경 Lumen 반사 디노이즈 스미어 완화). 수평선 시머 무회귀(distant < stock 0.30).
+  근경 "oily" 반사는 **Lumen-on-water 한계로 부분 잔존**(정직).
+- **D 전투 가독성**: 근접 요격 컷은 **프레이밍** 이슈가 주 → B의 블룸 톤다운으로 airburst가 개별 오렌지 디토네이션
+  으로 또렷이 읽힘("SPLASH — TARGET DOWN" 컷). VFX 스케일 무변경(프레이밍으로 해결).
+
+**측정(게임 부하, 1440p, ProfileGPU 11연속 캡처 직후 = HOT/worst-case):** 1250 steady, avg 17.62 ms /
+**56.7 fps**, p95/p99 21/22 ms, over-33.3 **0.1%**(1250프레임 중 1~2), hitch 0 → ✅ **PASS**. P2-5 cooled
+베이스라인(56.5 fps·p99 22)과 동일 → 지오 +1138 tris·B/C 값 변경 **perf 영향 0**. GPU 지배항 불변(SLW 38.2% /
+7.16 ms). 신규 툴: `reimport_frigate.py`(프리깃 단독 재임포트+슬롯 재배정 — 머티리얼 재생성/오션 참조 무손상),
+`showcase_shots.sh`(비평 4축 레퍼런스 프레이밍 before/after 재현).
+
+### 6.15 true-AAA 갭 클로징 (P3) — 다중 페르소나 critic 피드백 루프
+
+P2-6 후 4-critic이 만장일치 D/D+("tech-demo + 포스트 화장")로 판정 → 목표를 **true top-tier AAA**로 상향(아키텍처
+교체 포함). 두 도메인 critic subagent(해군 아트디렉터=함선, 렌더링 엔지니어=워터/라이팅)를 **연속 4라운드** 돌려
+캡처-비평-수정 루프를 반복. 전부 렌더 전용(결정론/sim/서버 무관).
+
+- **함선 (D+ → C- → C+ → B 궤적)**: ① **모델드 무장**(`frigate.py`) — 박스 터렛/스텁 배럴을 **faceted 함포-하우스
+  +테이퍼 배럴+머즐+다크 맨틀릿**으로, VLS를 8×4 32셀 **플러시 해치 그리드(다크 리세스 그라우트)**로, 마스트에
+  **AESA 어레이 면** 추가(해군AD #1 "지오메트리 게이트" 해소). ② **3-tier 밸류 스플릿**: 상부구조(`M_NavalGray`)
+  0.14→**0.20**(LIGHTEST)·헐 haze **0.10**(MID)·센서/마스트 `M_SensorDark` **0.045**(DARKEST) — 노출 후에도
+  3티어가 읽히도록 ≥0.08 절대차. ③ **부트-토핑** ~1.3 m 흘수선 다크 밴드 + 안티파울 다크-레드. ④ **플레이트
+  밀도 정정**: `textures.py` major 256→**512**(8→4 플레이트/타일 = ~0.3 m→**~1 m** 플레이트) + 용접비드 제거 →
+  "리벳/퀼트" 과텍스처를 **클린 아키텍처럴 패널 라인**으로. ⑤ **그라임 그라디언트**(world-Z, 흘수선↑ 농도).
+- **워터 (C- → C+/B- 궤적)**: ① **검은 "oily 리본"** 근본원인은 SLW ray-miss가 아니라 **near-mirror 러프니스가
+  어두운 씬을 반사**(렌더엔지니어 정정) → `Water Roughness` 0.075→**0.13**·`Water Fresnel Roughness`→0.22. ②
+  **de-pool**: `Scattering`을 pool-cyan에서 다크 petrol로 내렸다가(0.12,0.24,0.32) **black-glass 회귀** →
+  **luminous 플로어**(0.18,0.36,0.48)로 재조정(전경을 빛나는 물 위로 들어올림). ③ **레인보우 회귀 차단**:
+  SkyLight lower-hemi fill이 grazing clip/dispersion으로 무지개 흘수선 유발 → **A/B로 확정 후 롤백**(black 복귀).
+  ④ **매트 포말**: 플러그인이 **`Foam Roughness`** 노출(프로브 확인) → 0.90(specular chrome streak → 매트
+  화이트워터). **SLW 탈출 불요로 판정**(go/no-go 게이트 통과). ⑤ height fog 0.024→0.028·start 85→72km(수평선
+  seam 완화). 근경 grazing 반사는 **SLW 천장으로 일부 잔존**(정직 — 추가 개선은 depth-gradient/C++ 헐 포말 콜라).
+
+**측정(게임 부하, 1440p, cooled):** 1137 steady, avg **19.37 ms / 51.6 fps**, p95/p99 **23/24 ms**, over-33.3
+**0.1%**, hitch 0 → ✅ **PASS**(p99 24 ms = 41.7 fps, **40fps 플로어 충족**). GPU 지배항 불변(SLW 40.0% / SLW::Draw
+7.79 ms). 함선 지오 +무장/그리블·밸류/포말 머티리얼 변경 **perf 영향 0**(전부 값/노드, 화면 소수 픽셀).
+**⚠ 열 함정(중요)**: 백투백 GPU 작업(에디터 사이클×다수 + Blender + 캡처) 직후 측정 시 **전 패스 균일 ~2× 팽창**
+(avg 34 ms / SLW::Draw 11.9 ms = FLAG)이 발생 — **스로틀 아티팩트**(pmset therm 무경고에도). 권위는 **cooled
+측정**(~180s GPU 유휴 후): 위 19.4 ms가 진짜. 매 perf 게이트 전 쿨다운 필수. 신규 툴: `import_textures.py` 재사용,
+critic 추출(transcript JSONL의 최장 VERDICT 텍스트 블록 파싱).
+
+### 6.16 함선 표면 베이크 (P3-A) + 워터 SLW-천장 확정 (P3-B 프로브)
+
+5라운드 critic 후 갭이 **표면 밸류 → FORM(형상)**으로 좁혀짐. 함선 표면 아키텍처 패스 + 워터 한계 확정 프로브.
+
+- **P3-A 함선 표면 (cavity AO + 베벨, → ~B-)**: ① **cavity AO 베이크** — Blender Cycles AO를 정점-컬러로 베이크
+  (`asset_lib.cavity_ao`, LOD0만 cuts=1 서브디비전 8.9k→**35k tris**), FBX→UE 정점컬러 임포트(`reimport_frigate`
+  `vertex_color_import_option=REPLACE`), 머티리얼이 `base * lerp(0.68,1,VC)`로 곱함 — 블록 접합부·데크엣지 리세스·
+  수직면 베이스가 occlusion으로 어두워져 "putty monolith"를 깸. 머티리얼-측 **콘트라스트**(`saturate((VC-0.25)*1.7)`)로
+  blobby AO를 타이트한 리세스 라인으로 핀치(정점 밀도 무증가). ② **베벨 0.09→0.18 m** — 90° 하드 엣지가 lit 챔퍼
+  하이라이트를 잡게(해군AD 5 #1 "no lit edge = papercraft"). ③ 폴카닷 마이너 그리드 약화 + 메이저 시임 AO 심화(패널-
+  라인 밸류). **측정(cooled, 35k LOD0):** 1217 steady, avg **18.08 ms / 55.3 fps**, p95/p99 21/22, over-33.3
+  **0.1%**, hitch 0 → ✅ **PASS**(SLW::Draw 6.35 ms). +26k tris **perf 영향 0**(정점 비용 무시, 함선 = 소수 픽셀).
+- **P3-B 워터 SLW-천장 확정**: 근경 grazing "검은 글래스 미러"가 **유일 잔존 워터 갭**(render-eng 4: SLW 평면-셰이딩
+  구조적 한계 = escape 트리거). **cheap 레버 전수 소진 확정**(probe-first): Water Roughness·Scattering·Near Normal
+  0.34→0.60·**Gerstner steepness 0.42→0.62**·**진폭 50→100 cm(중간 해상)** — 어느 것도 grazing 미러를 못 깸.
+  중간 해상은 워터 바디(텍스처/움직임/매트 포말)를 개선해 **유지**, 단 미러는 불변 → **근경 미러 = SLW 셰이딩 하드
+  천장 확정**. 잔여 = **Phase 6b 풀 커스텀-오션 escape**(비-SLW 셰이딩/변위 메시·planar 반사 — 최대 리스크 아키텍처,
+  별도 집중 트랙). 워터 파라미터는 전부 **렌더 전용**(게임플레이 sea는 C++ `SeaEnvironmentController` → perf 무관).
+
+### 6.17 Phase 6b — SLW escape 프로브 & 결정(probe-first, 캡처 검증 → SLW strong-B 확정)
+
+근경 grazing "검은 글래스 미러"(SLW 셰이딩 하드 천장)의 유일 잔여 픽스인 **SLW escape**를 probe-first로 검증하고
+오너 결정으로 마감. **전부 렌더 전용**(결정론·sim·서버·부력 무관 — 부력은 변경 없는 플러그인 `UWaterWaves` 샘플).
+
+- **Stage-0 프로브(make-or-break = 변위가 비-SLW 머티리얼에 적용되나)**: `WaterBodyOcean`에 from-scratch
+  `DEFAULT_LIT` 머티리얼 할당 → **flat(변위 없음)**. 근본 메커니즘 발견: Gerstner 변위는 **머티리얼 WPO**
+  (`/Water/Materials/Functions/WaterHeightMappingVS`·`ComputeGerstnerWaves`)라 셰이딩 모델과 **독립**. 진짜 마스터
+  `/Water/Materials/WaterSurface/Water_Material`(NB: `Water_Material_Ocean`은 인스턴스의 인스턴스 → `shading_model`
+  속성 없음)을 복제해 **DEFAULT_LIT로 플립** → 변위·포말·뎁스 **생존**, 근경 미러 **소멸** ✅(probe_dup, show_2_hull
+  캡처). → **Path A(escape) 기술적 성립 확정.**
+- **production v1/v2(A/B 캡처, show_1_hero·show_2_hull·show_3_godray)**: 미러는 사라지나 DEFAULT_LIT가 SLW의
+  **볼류메트릭 Absorption/Scattering 뎁스-컬러 파이프라인을 우회** → 바다가 flat/washed(godray = 밀키 시트),
+  그리고 마스터 컬러 파라(`Water Albedo` 0.85·`Absorption` 10/150/350·`Scattering`)가 **DEFAULT_LIT에서 안 먹음**
+  (SLW 경로 구동). v2(Water Albedo 다크 네이비)도 무변화 → **파라 튜닝으론 복구 불가, base-color/reflection/normal
+  from-scratch 그래프 재작성 필요**(멀티사이클·SLW 능가 불확실).
+- **오너 결정(2026-06-17)**: **6a SLW strong-B 확정**, grazing 미러는 **알려진 잔차로 문서화**(plan kill-criterion),
+  효열 ROI가 더 큰 **함선(critic 4/4 #1 killer) Phase 7로 전환**. 라이브 오션은 SLW `MI_SeaOcean` 유지(미변경).
+  escape 재생성 코드는 파킹: `setup_materials.make_sea_ocean_custom` + `Tools/apply_custom.py` + `cinematic_shot.sh
+  --map`; throwaway 프로브 에셋(L_RangeProbe*/L_RangeCustom·M_OceanProbe_*·*SeaOceanCustom)·프로브 스크립트 삭제.
+  신규 일반 기능: `cinematic_shot.sh --map <pkg>`(비-기본 맵 캡처). `save_map`(save-as) 패턴 — 헤드리스에서
+  duplicate_asset+load_level은 GC-fatal, save-as는 안전. **perf 무관**(라이브 SLW 미변경 = §6.16 PASS 유지).
+
+### 6.18 Phase 7 — 히어로 함선 (해군-AD critic 루프, 진행 중: C/C+ → B−)
+
+워터 6b 셸빙 후 ROI 최우선인 함선으로 전환. 해군-AD critic 절대 AAA 재판정 → 갭 우선순위화 → probe-first 수정 → 재판정.
+**전부 렌더 전용·perf 무관**(라이팅 = 광원 방향, 머티리얼 = 값/러프 파라).
+
+- **critic #1 (C/C+)**: "시네마틱 rig 값 내고 overcast 그레이박스 렌더 — authored 키 라이트가 샷에 안 닿음, flat·cool·터미네이터 없음." → **라이팅이 #1, 표면은 그 다음**(키가 폼을 안 깎으면 머티리얼 판정 불가).
+- **수정 (capture-verified)**: 근본원인 = **Sun yaw 35°가 히어로 캠(SW→NE 시선) 바로 뒤 = 정면광 = flat**(프로브: 같은 각도 cloud-hide 컨트롤도 flat → 구름 아닌 방위각). **yaw 35→−55, pitch −16→−22로 측면 raking** → 패싯이 실제 명암 스텝으로 폼을 읽음. `setup_level.py`+`patch_level.py`(Rotator 인자 = (roll,pitch,yaw) on this build) + L_Range 적용. **→ B−**(critic 재판정, no inflation; 병목이 라이팅→표면 머티리얼 계층으로 이동).
+- **표면 증분 (B−)**: critic 재#1 = "putty monolith" 단일 그레이. ① **M_SensorDark → 블랙 레이더 글래스**(base 0.045→0.020·rough 0.35→0.12·metallic 0.6 → 레이더면이 raking 키에 샤프 스펙큘러). ② **흘수선 wetness 밴드 확대**(top 260→400 cm·power 1.7→1.2 → 젖은 띠가 읽힘). `setup_materials.py` 파라(소스), `tune_mats.py`로 M_NavalHull+M_SensorDark만 in-place 리빌드(메시 슬롯 경로 참조 → 재할당 불요).
+- **잔여**(critic): 함포/CIWS/헬로 = 별 gunmetal 머티리얼(frigate.py 재할당 + Blender 재임포트); 디테일-노멀/판접합 seam 심화(textures.py); 워터 반사 콘트라스트(make_far_ocean 값↑). 각 재캡처+critic 게이트. 신규 dev 툴: `tune_light.py`·`tune_mats.py`.

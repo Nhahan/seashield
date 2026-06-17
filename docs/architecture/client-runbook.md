@@ -35,6 +35,7 @@
 | 1 | `Tools/import_assets.py` | `Content/.../Meshes/SM_*` | LOD 체인 조립 포함 |
 | 1b | `Tools/import_textures.py` | `Content/.../Textures/T_*` | 노멀/마스크/스프라이트 압축·sRGB 설정. 머티리얼이 트라이플래너로 샘플 |
 | 2 | `Tools/setup_materials.py` | 머티리얼 15종(트라이플래너 PBR 디테일·부위별 슬롯 할당·연기 빌보드 퍼프·머즐 스프라이트 포함) | 재실행 = 전부 재생성. 순서: assets→textures→import_assets→import_textures→materials |
+| 1+2′ | `Tools/reimport_frigate.py` | `SM_Frigate`만 재임포트 + 슬롯 재배정 | **빠른 함선 지오 반복용 단축** — 머티리얼 재생성/오션 참조를 안 건드림(설정상 `setup_materials` 풀 재실행은 `MI_SeaOcean`을 delete/recreate해 레벨 참조를 댕글시킴). frigate.py만 고쳤을 때 1·2 대신 사용 |
 | 3 | `Tools/setup_level.py` | `L_Range` 전체 재생성 | **파괴적**, 워터 settle 30 s |
 | 4 | `Tools/patch_level.py` | 기존 레벨 인플레이스 패치 | 멱등, 3의 재생성 회피용 |
 
@@ -51,7 +52,11 @@
 - 레벨 저장은 워터 인포 메시의 **비동기 빌드 settle 후**에 해야 한다(스크립트가
   처리). 종료 시 teardown 크래시 1건은 무해(에셋은 이미 저장됨).
 - 로그는 `~/Library/Logs/Unreal Engine/SeaShieldEditor/SeaShield.log`. 성공 마커:
-  `SeaShieldLevel:`/`SeaShieldMaterials:`/`SeaShieldPatch:` 라인.
+  `SeaShieldLevel:`/`SeaShieldMaterials:`/`SeaShieldPatch:`/`SeaShieldReimport:` 라인.
+  헤드리스 실행 시 `-abslog=<file>`로 전체 엔진 로그를 파일로 스트리밍하면 부팅 침묵 구간에도
+  성장하는 출력으로 stall 오탐을 피하고 마커를 폴링할 수 있다(`run_watched` 200 s stall이 콜드
+  부팅 중 stdout 침묵에 오작동한 사례). `-ExecCmds="py <path>"`의 경로에 **내부 따옴표 금지**
+  (경로에 공백 없음) — `py "<path>"`는 UE 파서가 `py ` 빈 명령으로 깨뜨린다.
 
 ## 3. 실행·데모 플래그 레퍼런스
 
@@ -189,6 +194,7 @@ client/SeaShield/Tools/perf_capture.sh --cinematic --gpu --idle
 # 트레일러/스크린샷:
 client/SeaShield/Tools/cinematic_shot.sh --seq 3 --dur 45          # 게임 루프 필름스트립
 client/SeaShield/Tools/cinematic_shot.sh --shot 16 --sp 150        # 프린트급 단발 히어로컷(150% 슈퍼샘플)
+client/SeaShield/Tools/showcase_shots.sh _after                    # 비평 4축 레퍼런스 4컷 before/after 재현
 ```
 
 - `perf_capture.sh --cinematic`: `cinematic.cvars`를 `-dpcvars`로 주입 + `-SeaCinematic`.
