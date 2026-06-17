@@ -218,6 +218,19 @@ def radial_copies(obj, count, offset_deg=0.0):
     return instances
 
 
+def subdivided_grid(name, size_cm, segments):
+    """A flat XY plane (Z=0) of `segments`x`segments` quads spanning `size_cm` (centered at
+    origin), with planar UVs. For the cinematic ocean mesh (Phase-6b Path B): the WPO Gerstner
+    material displaces these vertices, so the segment density sets the macro-wave fidelity. The
+    micro-surface comes from the material's normal map, so the geometry only needs to resolve the
+    swell wavelengths (~2 m spacing handles the ~7 m+ band; finer chop is per-pixel normal)."""
+    bm = bmesh.new()
+    bmesh.ops.create_grid(bm, x_segments=segments, y_segments=segments,
+                          size=size_cm * 0.5, calc_uvs=True)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    return new_object(name, bm)
+
+
 def join(objects, name):
     """Join into one object (UE wants one static mesh per LOD)."""
     bpy.ops.object.select_all(action="DESELECT")

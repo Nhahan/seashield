@@ -1,6 +1,7 @@
 # Procedural materials for the procedural meshes — authored as node graphs in
 # code (MaterialEditingLibrary), same discipline as the bpy generators. Run
 # like setup_level.py (full editor, -ExecCmds="py ...").
+import math
 import re
 
 import unreal
@@ -386,6 +387,49 @@ def _roughness_from_detail(m, base_rough, rough_detail, ax, ay):
     return out
 
 
+def _hull_decal_mask(m, world, mask_z):
+    """World-projected hull-markings paint mask (S2 human-scale decal). The frigate sits at
+    STAGE_ORIGIN (300000,300000) facing +Y, ~150 m along Y. Map world-Y -> U (bow +Y at U~0,
+    stern toward U~1) and world-Z -> V (top->bottom), sample T_HullMarkings (CLAMP addressing =
+    one appearance, black border outside [0,1]). Returns the R-channel mask 0..1: 1 where the
+    pennant number / draft ladder / hatch stencil paints. Window values tuned to the hull."""
+    yy = _lib.create_material_expression(m, unreal.MaterialExpressionComponentMask, -1200, 1100)
+    yy.set_editor_property("r", False)
+    yy.set_editor_property("g", True)
+    yy.set_editor_property("b", False)
+    yy.set_editor_property("a", False)
+    _lib.connect_material_expressions(world, "", yy, "")
+    # ASPECT-MATCHED window: texture is 1024x256 (4:1), so the world window must be 4:1 (Yspan =
+    # 4 x Zspan) or the marks stretch. 20 m (Y) x 5 m (Z) forward-hull patch -> the "81" reads as a
+    # ~4.4 m x 2.3 m number, draft ladder at the stem, hatches aft, all undistorted on the topside.
+    usub = _lib.create_material_expression(m, unreal.MaterialExpressionSubtract, -1040, 1100)
+    _lib.connect_material_expressions(_const(m, 303000.0, -1200, 1240), "", usub, "A")  # window Y 301000..303000 (forward hull)
+    _lib.connect_material_expressions(yy, "", usub, "B")
+    u = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -880, 1100)
+    _lib.connect_material_expressions(usub, "", u, "A")
+    _lib.connect_material_expressions(_const(m, 1.0 / 2000.0, -1040, 1240), "", u, "B")  # 20 m span
+    vsub = _lib.create_material_expression(m, unreal.MaterialExpressionSubtract, -1040, 1320)
+    _lib.connect_material_expressions(_const(m, 540.0, -1200, 1460), "", vsub, "A")
+    _lib.connect_material_expressions(mask_z, "", vsub, "B")
+    v = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -880, 1320)
+    _lib.connect_material_expressions(vsub, "", v, "A")
+    _lib.connect_material_expressions(_const(m, 1.0 / 500.0, -1040, 1460), "", v, "B")  # 5 m span (Z 40..540)
+    uv = _lib.create_material_expression(m, unreal.MaterialExpressionAppendVector, -720, 1200)
+    _lib.connect_material_expressions(u, "", uv, "A")
+    _lib.connect_material_expressions(v, "", uv, "B")
+    ts = _lib.create_material_expression(m, unreal.MaterialExpressionTextureSample, -560, 1200)
+    ts.set_editor_property("texture", _detail_tex("T_HullMarkings"))
+    ts.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_MASKS)
+    _lib.connect_material_expressions(uv, "", ts, "UVs")
+    markr = _lib.create_material_expression(m, unreal.MaterialExpressionComponentMask, -380, 1200)
+    markr.set_editor_property("r", True)
+    markr.set_editor_property("g", False)
+    markr.set_editor_property("b", False)
+    markr.set_editor_property("a", False)
+    _lib.connect_material_expressions(ts, "", markr, "")
+    return markr
+
+
 def make_naval_hull():
     """Haze gray topsides, dark antifouling below the waterline (world Z 0),
     with a black boot-topping band — the classic warship paint scheme, driven
@@ -446,7 +490,7 @@ def make_naval_hull():
     # P3-2: tighter triplanar tile (650→420 cm) ~1.5x the texel density / plating frequency so
     # the panels read as plating up close instead of mip-blur (critics: "low-texel, flat"). The
     # P2-5 macro/2-variation blend keeps the tighter tile from re-introducing a visible repeat.
-    rough_d, ao_d, dirt_d = _detail_rao_blend(m, 420.0, macro, 700, -240)
+    rough_d, ao_d, dirt_d = _detail_rao_blend(m, 320.0, macro, 700, -240)  # P3-7.S1b: match the NORMAL tile (320) so AO seams and plate-line seams register at the SAME frequency (naval-AD: 420 vs 320 mismatch)
     # Strengthen the regional weathering: real warships rust/stain UNEVENLY (streaks below
     # fittings, salt-faded patches) — push the rust hard by region so the hull looks
     # lived-in, not a uniform clean coat. This both de-tiles and adds the realism the
@@ -481,7 +525,15 @@ def make_naval_hull():
     _lib.connect_material_expressions(base, "", base_wet, "A")
     _lib.connect_material_expressions(tint, "", base_wet, "B")
     base_final = _cavity_ao(m, base_wet, 0.68, 2640, 0)  # P3-A: baked cavity AO breaks the monolith
-    _lib.connect_material_property(base_final, "", unreal.MaterialProperty.MP_BASE_COLOR)
+    # S2 human-scale decal: paint the hull markings (number/draft/hatches) white where the
+    # world-projected stencil hits — the scale anchor naval-AD flagged as the #1 lever.
+    decal = _hull_decal_mask(m, world, mask_z)
+    white_paint = _const3(m, 0.86, 0.87, 0.90, 2640, 700)
+    base_marked = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, 2820, 0)
+    _lib.connect_material_expressions(base_final, "", base_marked, "A")
+    _lib.connect_material_expressions(white_paint, "", base_marked, "B")
+    _lib.connect_material_expressions(decal, "", base_marked, "Alpha")
+    _lib.connect_material_property(base_marked, "", unreal.MaterialProperty.MP_BASE_COLOR)
 
     wet_amt = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, 2320, 300)
     wet_k = _const(m, 0.85, 2150, 360)  # how far toward fully-wet the roughness drops
@@ -492,7 +544,12 @@ def make_naval_hull():
     _lib.connect_material_expressions(rough, "", rough_wet, "A")
     _lib.connect_material_expressions(wet_rough, "", rough_wet, "B")
     _lib.connect_material_expressions(wet_amt, "", rough_wet, "Alpha")
-    _lib.connect_material_property(rough_wet, "", unreal.MaterialProperty.MP_ROUGHNESS)
+    # painted markings read a touch matte vs the wet hull
+    rough_marked = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, 2820, 240)
+    _lib.connect_material_expressions(rough_wet, "", rough_marked, "A")
+    _lib.connect_material_expressions(_const(m, 0.42, 2640, 360), "", rough_marked, "B")
+    _lib.connect_material_expressions(decal, "", rough_marked, "Alpha")
+    _lib.connect_material_property(rough_marked, "", unreal.MaterialProperty.MP_ROUGHNESS)
 
     # P3-7: painted hull is dielectric (0), but WORN/rusted areas (dirt mask) read as bare
     # metal showing through the coating — the painted-vs-metal split the critics wanted.
@@ -505,7 +562,7 @@ def make_naval_hull():
     # ~140 m (PixelDepth) for crisp close-up detail without far-field shimmer. The COARSE
     # band is macro-blended between the two baked variations (P2-5) so the plate layout
     # de-tiles; the fine band stays single-variation (keeps the cost down).
-    nrm = _detail_normal_db(m, 420.0, 120.0, 2000.0, 14000.0, 700, 560,
+    nrm = _detail_normal_db(m, 320.0, 120.0, 2000.0, 22000.0, 700, 560,  # P3-7.S1b: hold the FINE sub-panel band out to ~220m (was 140m) so plate/weld relief still reads at the ~110m hero distance (naval-AD: real fix is longer-holding fine band/mip-bias, not more tile tightening); cap (0.6) keeps far-field shimmer down
                             tex2="T_ShipDetail_N2", macro=macro)
     _lib.connect_material_property(nrm, "", unreal.MaterialProperty.MP_NORMAL)
 
@@ -514,10 +571,57 @@ def make_naval_hull():
     return m
 
 
-def make_detailed(name, rgb, base_rough, metallic, tile_cm=300.0):
+def _deck_decal_mask(m):
+    """Top-down world-projected deck-markings mask (S2 polish — naval-AD gap #3: the main deck
+    reads as an empty plane from above). Frigate at STAGE_ORIGIN (300000,300000); deck ~110 m (Y)
+    x ~14 m (X). world-Y -> U (bow +Y at U~0, stern at U~1), world-X -> V (beam). CLAMP -> one
+    appearance. Returns the R-channel paint mask 0..1 (helo circle/non-skid/hatches)."""
+    world = _lib.create_material_expression(m, unreal.MaterialExpressionWorldPosition, -1200, 1700)
+    yy = _lib.create_material_expression(m, unreal.MaterialExpressionComponentMask, -1040, 1700)
+    yy.set_editor_property("r", False)
+    yy.set_editor_property("g", True)
+    yy.set_editor_property("b", False)
+    yy.set_editor_property("a", False)
+    _lib.connect_material_expressions(world, "", yy, "")
+    usub = _lib.create_material_expression(m, unreal.MaterialExpressionSubtract, -880, 1700)
+    _lib.connect_material_expressions(_const(m, 305000.0, -1040, 1840), "", usub, "A")
+    _lib.connect_material_expressions(yy, "", usub, "B")
+    u = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -720, 1700)
+    _lib.connect_material_expressions(usub, "", u, "A")
+    _lib.connect_material_expressions(_const(m, 1.0 / 11000.0, -880, 1840), "", u, "B")
+    xx = _lib.create_material_expression(m, unreal.MaterialExpressionComponentMask, -1040, 1920)
+    xx.set_editor_property("r", True)
+    xx.set_editor_property("g", False)
+    xx.set_editor_property("b", False)
+    xx.set_editor_property("a", False)
+    _lib.connect_material_expressions(world, "", xx, "")
+    vsub = _lib.create_material_expression(m, unreal.MaterialExpressionSubtract, -880, 1920)
+    _lib.connect_material_expressions(xx, "", vsub, "A")
+    _lib.connect_material_expressions(_const(m, 299300.0, -1040, 2060), "", vsub, "B")
+    v = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -720, 1920)
+    _lib.connect_material_expressions(vsub, "", v, "A")
+    _lib.connect_material_expressions(_const(m, 1.0 / 1400.0, -880, 2060), "", v, "B")
+    uv = _lib.create_material_expression(m, unreal.MaterialExpressionAppendVector, -560, 1800)
+    _lib.connect_material_expressions(u, "", uv, "A")
+    _lib.connect_material_expressions(v, "", uv, "B")
+    ts = _lib.create_material_expression(m, unreal.MaterialExpressionTextureSample, -400, 1800)
+    ts.set_editor_property("texture", _detail_tex("T_DeckMarkings"))
+    ts.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_MASKS)
+    _lib.connect_material_expressions(uv, "", ts, "UVs")
+    markr = _lib.create_material_expression(m, unreal.MaterialExpressionComponentMask, -240, 1800)
+    markr.set_editor_property("r", True)
+    markr.set_editor_property("g", False)
+    markr.set_editor_property("b", False)
+    markr.set_editor_property("a", False)
+    _lib.connect_material_expressions(ts, "", markr, "")
+    return markr
+
+
+def make_detailed(name, rgb, base_rough, metallic, tile_cm=300.0, deck_decal=False):
     """Painted/metal hard-surface material: a constant macro colour with triplanar
     PBR detail (panel normal + weathering roughness + seam AO + rust). Turns a
-    flat-shaded primitive into believable painted metal — no UVs (world triplanar)."""
+    flat-shaded primitive into believable painted metal — no UVs (world triplanar).
+    deck_decal=True overlays the top-down deck-markings stencil (M_NavalGray = deck)."""
     m = _new_material(name)
     macro = _const3(m, *rgb, -1100, -240)
     rough_d, ao_d, dirt_d = _detail_rao(m, tile_cm, 200, -240)
@@ -528,8 +632,21 @@ def make_detailed(name, rgb, base_rough, metallic, tile_cm=300.0):
     dirt_d = _macro_modulate(m, dirt_d, macrovar, 0.25, 1.8, -680, 760)
     base = _weathered_basecolor(m, macro, ao_d, dirt_d, 1100, -240)
     base = _cavity_ao(m, base, 0.68, 1320, -240)  # P3-A: baked cavity AO (superstructure/deck monolith break)
-    _lib.connect_material_property(base, "", unreal.MaterialProperty.MP_BASE_COLOR)
     rough = _roughness_from_detail(m, base_rough, rough_d, 1100, 240)
+    if deck_decal:
+        decal = _deck_decal_mask(m)
+        white = _const3(m, 0.78, 0.79, 0.82, 1320, 120)  # painted deck markings (white non-skid/helo)
+        bmix = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, 1500, -200)
+        _lib.connect_material_expressions(base, "", bmix, "A")
+        _lib.connect_material_expressions(white, "", bmix, "B")
+        _lib.connect_material_expressions(decal, "", bmix, "Alpha")
+        base = bmix
+        rmix = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, 1500, 240)
+        _lib.connect_material_expressions(rough, "", rmix, "A")
+        _lib.connect_material_expressions(_const(m, 0.5, 1320, 360), "", rmix, "B")
+        _lib.connect_material_expressions(decal, "", rmix, "Alpha")
+        rough = rmix
+    _lib.connect_material_property(base, "", unreal.MaterialProperty.MP_BASE_COLOR)
     _lib.connect_material_property(rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
     metal = _const(m, metallic, 1100, 420)
     _lib.connect_material_property(metal, "", unreal.MaterialProperty.MP_METALLIC)
@@ -864,69 +981,6 @@ def make_sea_ocean():
     )
 
 
-# Phase-6b Path A — the param set tuned for the DEFAULT_LIT custom ocean (the SLW
-# escape). Same vocabulary as make_sea_ocean's 6a overrides, but now that the grazing
-# BLACK MIRROR is gone (DEFAULT_LIT instead of SingleLayerWater), the roughness floor
-# that 6a had to hold at 0.13 to scatter the mirror can drop — a lower roughness gives
-# the sea real specular sheen + Lumen reflection life instead of a matte sheet.
-_CUSTOM_OCEAN_OVERRIDES = {
-    # v1 washed out because DEFAULT_LIT IGNORES the SLW volumetric Absorption/Scattering
-    # depth-colour pipeline, leaving the near-white master `Water Albedo` (0.85) as a
-    # Lambertian milky sheet. Real water is a DARK body lit mostly by sky/sun REFLECTION:
-    # drop the albedo to a deep-ocean navy and keep roughness low so brightness comes from
-    # the specular sky/Lumen reflection, not a bright diffuse — restoring depth + glitter
-    # while keeping the SLW black mirror gone.
-    "Water Roughness": 0.035,               # reflective sheen (mirror gone -> safe; 6a had to hold 0.13)
-    "Water Fresnel Roughness": 0.10,
-    "Water Specular": 0.35,                 # 0.225 -> stronger sky/sun reflection (water F0)
-    "Default Near Normal Strength": 0.50,   # crisp near relief / glints
-    "Default Distant Normal Strength": 0.16,
-    "Default Distant Normal StrengthB": 0.12,
-    "Far Normal Fresnel Power": 18.0,       # confine the distant flatten to the true horizon
-    "Foam Opacity": 1.0,
-    "Foam Boost": 5.0,                      # readable whitecaps
-    "Height Bias": 0.06,
-    "Foam Roughness": 0.90,                 # matte whitewater
-    "FoamContrast": 0.24,
-}
-_CUSTOM_OCEAN_VEC_OVERRIDES = {
-    "Water Albedo": (0.012, 0.040, 0.085),  # 0.85 white -> deep-ocean navy (the v1 washout fix)
-}
-
-
-def make_sea_ocean_custom():
-    """Phase-6b Path A — the SingleLayerWater ESCAPE. [PARKED 2026-06-17 — NOT wired into
-    the live pipeline; the live ocean stays SLW MI_SeaOcean. Kept as the regeneration path
-    if the escape is revived. Run via apply_custom.py onto a throwaway map. See
-    perf-report §6.17 / memory water-slw-grazing-ceiling for why it was shelved.]
-
-    The near-camera grazing reflection reads as a smooth dark 'oily glass mirror' under SLW
-    shading; 6a proved every cheap/medium lever (roughness, scattering floor, near-normal,
-    wave steepness/amplitude) cannot break it — it is the SLW flat-plane shading hard
-    ceiling. This duplicates the Water-plugin master `Water_Material` and flips its shading
-    model OFF SingleLayerWater to DEFAULT_LIT. The probe (capture-verified) confirmed the
-    Gerstner vertex displacement (material WPO via WaterHeightMappingVS), foam and depth
-    color all SURVIVE the shading-model change, AND the grazing foreground stops collapsing
-    to black — BUT DEFAULT_LIT also bypasses the SLW volumetric Absorption/Scattering colour
-    pipeline, so the sea reads flat/washed and the master's colour params (Water Albedo etc.)
-    no longer bite. Recovering a premium look needs a from-scratch base-colour/reflection
-    graph rewrite — shelved in favour of the higher-ROI ship pass. MI_SeaOceanCustom
-    instances it with water-tuned params."""
-    src = "/Water/Materials/WaterSurface/Water_Material"
-    path = f"{MAT_DIR}/M_SeaOceanCustom"
-    if unreal.EditorAssetLibrary.does_asset_exist(path):
-        unreal.EditorAssetLibrary.delete_asset(path)
-    if not unreal.EditorAssetLibrary.duplicate_asset(src, path):
-        raise RuntimeError(f"failed to duplicate {src} -> {path}")
-    m = unreal.load_asset(path)
-    m.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_DEFAULT_LIT)
-    _lib.recompile_material(m)
-    unreal.EditorAssetLibrary.save_loaded_asset(m)
-    _ocean_instance("MI_SeaOceanCustom", path, _CUSTOM_OCEAN_OVERRIDES,
-                    _CUSTOM_OCEAN_VEC_OVERRIDES)
-    return m
-
-
 def make_burst():
     """Airburst — a flak puff, not a grey ball. A hot core flashes at detonation
     then decays to dark powder smoke (driven by the C++-set 'Age' 0..1 scalar);
@@ -1203,7 +1257,21 @@ def make_wake():
     edge = _lib.create_material_expression(m, unreal.MaterialExpressionOneMinus, -170, 350)
     _lib.connect_material_expressions(upow, "", edge, "")
 
-    noise = _panned_noise(m, 0.004, (0.0, 0.0, 0.0), 0.30, 2.0, ax=-560, ay=640)
+    # World-space turbulence — but SOFT (cut 0.30->0.05, gain 2.0->1.0, finer 0.004->0.006) and
+    # FLOORED into [0.6, 1.0] so it gently churns the foam instead of breaking it to ZERO between
+    # patches. The old high-contrast mask read as discrete dashes on a slow/distant wake.
+    # MULTI-SCALE world-space turbulence so the foam reads as ragged whitewater, not a solid white
+    # band: a coarse patch noise x a finer churn noise, floored at 0.30 (ragged holes, but not the
+    # zero-gaps that read as dashes on a slow/distant wake).
+    n_coarse = _panned_noise(m, 0.006, (0.0, 0.0, 0.0), 0.05, 1.0, ax=-560, ay=640)
+    n_fine = _panned_noise(m, 0.022, (1.2, 0.7, 0.0), 0.0, 1.3, ax=-560, ay=920)
+    ncomb = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -420, 700)
+    _lib.connect_material_expressions(n_coarse, "", ncomb, "A")
+    _lib.connect_material_expressions(n_fine, "", ncomb, "B")
+    noise = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, -280, 700)
+    _lib.connect_material_expressions(_const(m, 0.30, -420, 820), "", noise, "A")
+    _lib.connect_material_expressions(_const(m, 1.0, -420, 900), "", noise, "B")
+    _lib.connect_material_expressions(ncomb, "", noise, "Alpha")
 
     base_op = _const(m, 1.2, -700, 180)
     o1 = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -120, 160)
@@ -1217,6 +1285,54 @@ def make_wake():
     _lib.connect_material_expressions(noise, "", o3, "B")
     osat = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, 340, 280)
     _lib.connect_material_expressions(o3, "", osat, "")
+    _lib.connect_material_property(osat, "", unreal.MaterialProperty.MP_OPACITY)
+
+    _lib.recompile_material(m)
+    unreal.EditorAssetLibrary.save_loaded_asset(m)
+    return m
+
+
+def make_spray():
+    """White water-spray puff for the hull waterline ISM particles — small
+    aerated droplets thrown off the hull where waves slap it. Camera-facing
+    billboard (same ISM / Plane mesh path as M_RocketSmoke). Age (0..1) is
+    read from per-instance custom-data slot 0 exactly as make_rocket_smoke()
+    does (MaterialExpressionPerInstanceCustomData, data_index=0). Opacity =
+    soft round Fresnel feather * (1-Age); emissive = near-white water colour."""
+    m = _new_material("M_Spray")
+    m.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
+    m.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
+    m.set_editor_property("two_sided", True)
+    m.set_editor_property("used_with_instanced_static_meshes", True)
+
+    # Per-instance Age 0..1 from custom-data slot 0 (same as make_rocket_smoke).
+    age = _instance_age(m, -1000, 400)
+
+    # White spray colour — slightly blue-tinted aerated water.
+    white = _const3(m, 0.95, 0.97, 1.0, -700, -120)
+    _lib.connect_material_property(white, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+
+    # RADIAL UV feather: a camera-facing billboard is flat-on, so Fresnel (≈0 when facing) can't
+    # soften it — that left hard white SQUARES. Fade by distance from the UV centre instead, so the
+    # plane reads as a soft round droplet (opaque centre -> transparent edge).
+    uv = _lib.create_material_expression(m, unreal.MaterialExpressionTextureCoordinate, -900, 200)
+    feather = _lib.create_material_expression(m, unreal.MaterialExpressionCustom, -700, 200)
+    feather.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT1)
+    in_uv = unreal.CustomInput(); in_uv.set_editor_property("input_name", "UV")
+    feather.set_editor_property("inputs", [in_uv])
+    feather.set_editor_property("code", "return saturate(1.0 - 2.1 * length(UV - 0.5));")
+    _lib.connect_material_expressions(uv, "", feather, "UV")
+
+    # Age fade: (1 - Age) so the puff starts opaque and fully dissolves.
+    ageinv = _lib.create_material_expression(m, unreal.MaterialExpressionOneMinus, -700, 400)
+    _lib.connect_material_expressions(age, "", ageinv, "")
+
+    # opacity = feather * (1-Age), then saturate.
+    o1 = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -360, 280)
+    _lib.connect_material_expressions(feather, "", o1, "A")
+    _lib.connect_material_expressions(ageinv, "", o1, "B")
+    osat = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, -200, 280)
+    _lib.connect_material_expressions(o1, "", osat, "")
     _lib.connect_material_property(osat, "", unreal.MaterialProperty.MP_OPACITY)
 
     _lib.recompile_material(m)
@@ -1251,6 +1367,402 @@ def assign_by_slot(mesh_name, slot_map, default):
         mesh.set_material(i, slot_map.get(name) or slot_map.get(base, default))
     unreal.EditorAssetLibrary.save_loaded_asset(mesh)
     unreal.log(f"SeaShieldMaterials: {mesh_name} slots={[str(s.get_editor_property('imported_material_slot_name')) for s in slots]}")
+
+
+# ============================================================================
+# From-scratch realistic ocean (2026-06-18). Replaces the removed SLW/CineOcean
+# experiments. A custom dense grid (SM_Ocean) displaced by a 32-wave Gerstner sum
+# (WPO), shaded as a Substrate Default-Lit TRANSLUCENT surface-forward material:
+# real refraction + Beer-Lambert depth absorption + analytic wave normal + Jacobian
+# whitecap foam + Fresnel sky-reflection in EMISSIVE (so grazing is never black) +
+# analytic sun glitter. Max quality, fps ignored. Render-only — buoyancy samples the
+# hidden plugin ocean. Built by apply_ocean.py on the throwaway L_RangeCustom.
+# ============================================================================
+_OCN_WIND_DEG = 40.0
+_OCN_N = 32
+_OCN_LAM_MAX = 18000.0      # cm — 180 m long swell
+_OCN_LAM_MIN = 220.0        # cm — 2.2 m chop
+_OCN_HS = 320.0             # significant wave height target (cm) — livelier sea
+_OCN_STEEP = 0.92           # total horizontal pinch (<1 = crests sharpen but don't loop)
+_OCN_G = 981.0              # cm/s^2 (deep-water dispersion omega = sqrt(g*k))
+_OCN_FOAM_THRESH = 0.95     # Jacobian fold threshold (J below this -> whitecap)
+_OCN_FOAM_SHARP = 3.5
+_OCN_CREST_H = 90.0         # cm — crest-height foam assist starts (whitecaps on tall crests)
+_OCN_CREST_R = 80.0
+_OCN_SHALLOW = (0.06, 0.22, 0.26)   # shallow/near water tint
+_OCN_DEEP = (0.004, 0.020, 0.045)   # deep open-ocean body
+_OCN_FOAMCOL = (0.96, 0.98, 1.0)
+_OCN_DEPTH_RANGE_M = 6.0    # m over which shallow -> deep
+_OCN_SKY = (0.18, 0.30, 0.46)       # grazing sky-reflection colour (emissive floor)
+_OCN_SKY_STR = 0.9
+_OCN_DEBUG_FOAM = False              # DIAG: emissive = mask*red to visualise a foam mask
+
+
+def _ocean_waves():
+    """Deterministic 32-wave ocean spectrum (build-time only — NOT the sim RNG). Geometric
+    wavelengths 2.2-180 m, amplitude ~ sqrt(lambda) (long swell dominant) normalised to a ~2.3 m
+    significant height, directions jittered ±(tighter for swell, wider for chop) about the wind,
+    per-wave steepness Q normalised so the total horizontal pinch stays < 1 (crests don't loop).
+    Returns (lambda_cm, amp_cm, dir_x, dir_y, Q, omega) per wave."""
+    s = [0x2545F491]
+
+    def rnd():
+        s[0] = (s[0] * 1103515245 + 12345) & 0x7fffffff
+        return s[0] / 0x7fffffff
+
+    n = _OCN_N
+    raw = [(_OCN_LAM_MAX * (_OCN_LAM_MIN / _OCN_LAM_MAX) ** (i / (n - 1))) for i in range(n)]
+    weights = [lam ** 0.5 for lam in raw]
+    scale = (_OCN_HS * 0.5) / sum(weights)
+    waves = []
+    for i, lam in enumerate(raw):
+        f = i / (n - 1)
+        a = weights[i] * scale
+        k = 2.0 * math.pi / lam
+        omega = math.sqrt(_OCN_G * k)
+        ang = math.radians(_OCN_WIND_DEG + (rnd() * 2.0 - 1.0) * (10.0 + 62.0 * f))
+        q = (_OCN_STEEP / n) / (k * a)
+        waves.append((lam, a, math.cos(ang), math.sin(ang), q, omega))
+    return waves
+
+
+def _ocean_arrays():
+    w = _ocean_waves()
+
+    def arr(name, idx, fmt):
+        return "float " + name + "[" + str(len(w)) + "] = {" + ",".join(fmt % x[idx] for x in w) + "};"
+
+    return "\n".join([
+        "const int N = " + str(len(w)) + ";",
+        arr("WL", 0, "%.2f"), arr("AM", 1, "%.4f"),
+        arr("DX", 2, "%.6f"), arr("DY", 3, "%.6f"),
+        arr("QF", 4, "%.7f"), arr("SP", 5, "%.6f"),
+    ])
+
+
+# Custom-HLSL: sum-of-Gerstner displacement -> WPO (vertex stage).
+_OCEAN_DISP_HLSL = _ocean_arrays() + """
+float3 P = WP; float t = T;
+float3 disp = float3(0.0, 0.0, 0.0);
+for (int i = 0; i < N; i++) {
+    float2 d = float2(DX[i], DY[i]);
+    float k = 6.28318530718 / WL[i];
+    float ph = k * dot(d, P.xy) + SP[i] * t;
+    float c = cos(ph), s = sin(ph);
+    float qa = QF[i] * AM[i];
+    disp.x += qa * d.x * c;
+    disp.y += qa * d.y * c;
+    disp.z += AM[i] * s;
+}
+return disp;
+"""
+
+# Custom-HLSL: analytic Gerstner surface normal (world == tangent on the flat grid) + Jacobian-fold
+# whitecap foam, in one float4 (normal.xyz, foam.w). Pixel stage.
+_OCEAN_SURF_HLSL = _ocean_arrays() + ("""
+float3 P = WP; float t = T;
+float nx = 0.0, ny = 0.0, jz = 0.0, h = 0.0;
+float Jxx = 0.0, Jyy = 0.0, Jxy = 0.0;
+for (int i = 0; i < N; i++) {
+    float2 d = float2(DX[i], DY[i]);
+    float k = 6.28318530718 / WL[i];
+    float ph = k * dot(d, P.xy) + SP[i] * t;
+    float c = cos(ph), s = sin(ph);
+    float wa = k * AM[i];
+    nx += -d.x * wa * c;
+    ny += -d.y * wa * c;
+    jz += QF[i] * wa * s;
+    h  += AM[i] * s;
+    Jxx += -QF[i] * d.x * d.x * wa * s;
+    Jyy += -QF[i] * d.y * d.y * wa * s;
+    Jxy += -QF[i] * d.x * d.y * wa * s;
+}
+float3 nrm = normalize(float3(nx, ny, 1.0 - jz));
+float J = (1.0 + Jxx) * (1.0 + Jyy) - Jxy * Jxy;
+float foldFoam = saturate((%(ft)f - J) * %(fs)f);
+float crestFoam = saturate((h - %(ch)f) / %(cr)f);
+float foam = saturate(foldFoam + crestFoam * 0.8);
+return float4(nrm, foam);
+""" % {"ft": _OCN_FOAM_THRESH, "fs": _OCN_FOAM_SHARP, "ch": _OCN_CREST_H, "cr": _OCN_CREST_R})
+
+
+def _ocean_custom(m, code, out_type, ax, ay):
+    """A WP(float3 world pos)+T(time) Custom HLSL node — the shared shape for the ocean disp/surf."""
+    wp = _lib.create_material_expression(m, unreal.MaterialExpressionWorldPosition, ax - 320, ay)
+    tm = _lib.create_material_expression(m, unreal.MaterialExpressionTime, ax - 320, ay + 140)
+    cust = _lib.create_material_expression(m, unreal.MaterialExpressionCustom, ax, ay)
+    cust.set_editor_property("output_type", out_type)
+    in_wp = unreal.CustomInput(); in_wp.set_editor_property("input_name", "WP")
+    in_t = unreal.CustomInput(); in_t.set_editor_property("input_name", "T")
+    cust.set_editor_property("inputs", [in_wp, in_t])
+    cust.set_editor_property("code", code)
+    _lib.connect_material_expressions(wp, "", cust, "WP")
+    _lib.connect_material_expressions(tm, "", cust, "T")
+    return cust
+
+
+def _ocean_glitter(m, ax, ay):
+    """Analytic sun glint: pow(saturate(reflect . sun), hi) gated by sparse panned noise -> HDR
+    emissive. Guarded — returns None if a SkyAtmosphere/Reflection node is unavailable headless."""
+    try:
+        refl = _lib.create_material_expression(m, unreal.MaterialExpressionReflectionVectorWS, ax, ay)
+        sun = _lib.create_material_expression(m, unreal.MaterialExpressionSkyAtmosphereLightDirection, ax, ay + 150)
+        try:
+            sun.set_editor_property("light_index", 0)
+        except Exception:  # noqa: BLE001
+            pass
+        dp = _lib.create_material_expression(m, unreal.MaterialExpressionDotProduct, ax + 200, ay + 60)
+        _lib.connect_material_expressions(refl, "", dp, "A")
+        _lib.connect_material_expressions(sun, "", dp, "B")
+        ds = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, ax + 360, ay + 60)
+        _lib.connect_material_expressions(dp, "", ds, "")
+        pw = _lib.create_material_expression(m, unreal.MaterialExpressionPower, ax + 520, ay + 60)
+        pw.set_editor_property("const_exponent", 160.0)  # broader so the glitter road reads
+        _lib.connect_material_expressions(ds, "", pw, "Base")
+        gate = _panned_noise(m, 0.02, (1.5, -1.0, 0.0), 0.20, 3.0, ax + 200, ay + 360)
+        g1 = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, ax + 700, ay + 60)
+        _lib.connect_material_expressions(pw, "", g1, "A")
+        _lib.connect_material_expressions(gate, "", g1, "B")
+        g2 = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, ax + 860, ay + 60)
+        _lib.connect_material_expressions(g1, "", g2, "A")
+        _lib.connect_material_expressions(_const(m, 28.0, ax + 700, ay + 200), "", g2, "B")
+        out = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, ax + 1020, ay + 60)
+        _lib.connect_material_expressions(g2, "", out, "A")
+        _lib.connect_material_expressions(_const3(m, 1.0, 0.95, 0.82, ax + 860, ay + 200), "", out, "B")
+        return out
+    except Exception as exc:  # noqa: BLE001
+        unreal.log_warning(f"SeaShieldMaterials: ocean glitter skipped ({exc})")
+        return None
+
+
+def _ocean_sss(m, nrm, ax, ay):
+    """Fake subsurface scattering — backlit wave crests glow jade-green when the sun is behind the
+    wave (the 'lit jade' signature of real ocean). Crytek-style half-vector back-scatter, additive
+    emissive. Guarded — returns None if a SkyAtmosphere/Camera node is unavailable headless."""
+    try:
+        L = _lib.create_material_expression(m, unreal.MaterialExpressionSkyAtmosphereLightDirection, ax, ay)
+        try:
+            L.set_editor_property("light_index", 0)
+        except Exception:  # noqa: BLE001
+            pass
+        V = _lib.create_material_expression(m, unreal.MaterialExpressionCameraVectorWS, ax, ay + 150)
+        cust = _lib.create_material_expression(m, unreal.MaterialExpressionCustom, ax + 240, ay + 60)
+        cust.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT1)
+        in_l = unreal.CustomInput(); in_l.set_editor_property("input_name", "L")
+        in_n = unreal.CustomInput(); in_n.set_editor_property("input_name", "N")
+        in_v = unreal.CustomInput(); in_v.set_editor_property("input_name", "V")
+        cust.set_editor_property("inputs", [in_l, in_n, in_v])
+        cust.set_editor_property("code", "float3 H = normalize(L + N * 0.4);\nreturn pow(saturate(dot(-V, H)), 3.0);")
+        _lib.connect_material_expressions(L, "", cust, "L")
+        _lib.connect_material_expressions(nrm, "", cust, "N")
+        _lib.connect_material_expressions(V, "", cust, "V")
+        sc = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, ax + 420, ay + 60)
+        _lib.connect_material_expressions(cust, "", sc, "A")
+        _lib.connect_material_expressions(_const(m, 1.6, ax + 300, ay + 200), "", sc, "B")
+        out = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, ax + 560, ay + 60)
+        _lib.connect_material_expressions(sc, "", out, "A")
+        _lib.connect_material_expressions(_const3(m, 0.05, 0.33, 0.24, ax + 420, ay + 200), "", out, "B")
+        return out
+    except Exception as exc:  # noqa: BLE001
+        unreal.log_warning(f"SeaShieldMaterials: ocean SSS skipped ({exc})")
+        return None
+
+
+def make_ocean():
+    """The from-scratch realistic ocean material (see section header). Substrate Default-Lit,
+    BLEND_TRANSLUCENT, surface-forward — emissive works (unlike SLW), refraction is real, and we
+    own the reflective look so grazing is never the SLW black mirror."""
+    m = _new_material("M_Ocean")
+    m.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_DEFAULT_LIT)
+    m.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
+    try:
+        m.set_editor_property("translucency_lighting_mode",
+                              unreal.TranslucencyLightingMode.TLM_SURFACE_FORWARD_SHADING)
+    except Exception as exc:  # noqa: BLE001
+        unreal.log_warning(f"SeaShieldMaterials: TLM set skipped ({exc})")
+    try:
+        m.set_editor_property("refraction_method", unreal.RefractionMode.RM_PIXEL_NORMAL_OFFSET)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # displacement (WPO) + analytic normal/foam
+    disp = _ocean_custom(m, _OCEAN_DISP_HLSL, unreal.CustomMaterialOutputType.CMOT_FLOAT3, -1900, -260)
+    _lib.connect_material_property(disp, "", unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
+    surf = _ocean_custom(m, _OCEAN_SURF_HLSL, unreal.CustomMaterialOutputType.CMOT_FLOAT4, -1900, 260)
+    nrm = _lib.create_material_expression(m, unreal.MaterialExpressionComponentMask, -1640, 240)
+    nrm.set_editor_property("r", True); nrm.set_editor_property("g", True)
+    nrm.set_editor_property("b", True); nrm.set_editor_property("a", False)
+    _lib.connect_material_expressions(surf, "", nrm, "")
+    _lib.connect_material_property(nrm, "", unreal.MaterialProperty.MP_NORMAL)
+    foam_raw = _lib.create_material_expression(m, unreal.MaterialExpressionComponentMask, -1640, 380)
+    foam_raw.set_editor_property("r", False); foam_raw.set_editor_property("g", False)
+    foam_raw.set_editor_property("b", False); foam_raw.set_editor_property("a", True)
+    _lib.connect_material_expressions(surf, "", foam_raw, "")
+    # INTERSECTION FOAM — the wash where the water meets the HULL. The translucent water sees the
+    # opaque hull behind it (SceneDepth); where SceneDepth ~ PixelDepth the water is right against the
+    # hull -> white foam collar. Near-gated (no foam at the far mesh->FarOcean seam). It's in the ocean
+    # material, so it rides the visible waves AND hugs the moving hull automatically.
+    sd_e = _lib.create_material_expression(m, unreal.MaterialExpressionSceneDepth, -1640, 560)
+    pd_e = _lib.create_material_expression(m, unreal.MaterialExpressionPixelDepth, -1640, 700)
+    ediff = _lib.create_material_expression(m, unreal.MaterialExpressionSubtract, -1480, 600)
+    _lib.connect_material_expressions(sd_e, "", ediff, "A")
+    _lib.connect_material_expressions(pd_e, "", ediff, "B")
+    edn = _lib.create_material_expression(m, unreal.MaterialExpressionDivide, -1340, 600)
+    _lib.connect_material_expressions(ediff, "", edn, "A")
+    _lib.connect_material_expressions(_const(m, 700.0, -1480, 660), "", edn, "B")   # ~7 m wash band at the hull
+    eone = _lib.create_material_expression(m, unreal.MaterialExpressionOneMinus, -1200, 600)
+    _lib.connect_material_expressions(edn, "", eone, "")
+    edge = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, -1080, 600)
+    _lib.connect_material_expressions(eone, "", edge, "")
+    ngn = _lib.create_material_expression(m, unreal.MaterialExpressionSubtract, -1340, 780)
+    _lib.connect_material_expressions(_const(m, 42000.0, -1480, 780), "", ngn, "A")  # fade out beyond ~420 m
+    _lib.connect_material_expressions(pd_e, "", ngn, "B")
+    ngd = _lib.create_material_expression(m, unreal.MaterialExpressionDivide, -1200, 780)
+    _lib.connect_material_expressions(ngn, "", ngd, "A")
+    _lib.connect_material_expressions(_const(m, 16000.0, -1340, 860), "", ngd, "B")
+    ngs = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, -1080, 780)
+    _lib.connect_material_expressions(ngd, "", ngs, "")
+    edge_g = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -940, 680)
+    _lib.connect_material_expressions(edge, "", edge_g, "A")
+    _lib.connect_material_expressions(ngs, "", edge_g, "B")
+    foam_in = _lib.create_material_expression(m, unreal.MaterialExpressionMax, -800, 460)
+    _lib.connect_material_expressions(foam_raw, "", foam_in, "A")
+    _lib.connect_material_expressions(edge_g, "", foam_in, "B")
+    # break the foam into ragged whitewater patches (world-space panned turbulence) instead of smooth
+    # crest tips — the difference between 'highlights' and 'foam'
+    fnoise = _panned_noise(m, 0.03, (2.0, 1.5, 0.0), 0.0, 1.0, -1500, 520)
+    fbk = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, -1340, 460)
+    _lib.connect_material_expressions(_const(m, 0.25, -1500, 440), "", fbk, "A")
+    _lib.connect_material_expressions(_const(m, 1.3, -1500, 600), "", fbk, "B")
+    _lib.connect_material_expressions(fnoise, "", fbk, "Alpha")
+    fmul = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -1200, 400)
+    _lib.connect_material_expressions(foam_in, "", fmul, "A")
+    _lib.connect_material_expressions(fbk, "", fmul, "B")
+    fsat = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, -1060, 400)
+    _lib.connect_material_expressions(fmul, "", fsat, "")
+    # CONTRAST: crush the low-mid foam wash so only strong foam whitens -> crisp scattered whitecaps
+    fsub = _lib.create_material_expression(m, unreal.MaterialExpressionSubtract, -920, 400)
+    _lib.connect_material_expressions(fsat, "", fsub, "A")
+    _lib.connect_material_expressions(_const(m, 0.45, -1060, 520), "", fsub, "B")
+    fcon = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -780, 400)
+    _lib.connect_material_expressions(fsub, "", fcon, "A")
+    _lib.connect_material_expressions(_const(m, 4.0, -920, 520), "", fcon, "B")
+    foam_w = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, -640, 400)
+    _lib.connect_material_expressions(fcon, "", foam_w, "")
+    # the hull-intersection collar bypasses the wave-foam contrast (stays a strong wash) but gets a
+    # light noise break so it reads as organic whitewater hugging the hull, not a clean ring.
+    enb = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, -620, 520)
+    _lib.connect_material_expressions(_const(m, 0.5, -760, 520), "", enb, "A")
+    _lib.connect_material_expressions(_const(m, 1.1, -760, 600), "", enb, "B")
+    _lib.connect_material_expressions(fnoise, "", enb, "Alpha")
+    edge_b = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -560, 460)
+    _lib.connect_material_expressions(edge_g, "", edge_b, "A")
+    _lib.connect_material_expressions(enb, "", edge_b, "B")
+    foam = _lib.create_material_expression(m, unreal.MaterialExpressionMax, -420, 440)
+    _lib.connect_material_expressions(foam_w, "", foam, "A")
+    _lib.connect_material_expressions(edge_b, "", foam, "B")
+
+    # Fresnel from the wave pixel-normal (drives sky reflection + colour blend)
+    fres = _lib.create_material_expression(m, unreal.MaterialExpressionFresnel, -1200, 720)
+    fres.set_editor_property("exponent", 5.0)
+    try:
+        fres.set_editor_property("base_reflect_fraction", 0.02)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # depth (Beer-Lambert): waterDepth = SceneDepth - PixelDepth  -> deep colour with depth
+    sd = _lib.create_material_expression(m, unreal.MaterialExpressionSceneDepth, -1200, 0)
+    pd = _lib.create_material_expression(m, unreal.MaterialExpressionPixelDepth, -1200, 120)
+    wsub = _lib.create_material_expression(m, unreal.MaterialExpressionSubtract, -1040, 40)
+    _lib.connect_material_expressions(sd, "", wsub, "A")
+    _lib.connect_material_expressions(pd, "", wsub, "B")
+    wmax = _lib.create_material_expression(m, unreal.MaterialExpressionMax, -900, 40)
+    _lib.connect_material_expressions(wsub, "", wmax, "A")
+    _lib.connect_material_expressions(_const(m, 0.0, -1040, 160), "", wmax, "B")
+    wdm = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -760, 40)  # cm->m
+    _lib.connect_material_expressions(wmax, "", wdm, "A")
+    _lib.connect_material_expressions(_const(m, 0.01, -900, 160), "", wdm, "B")
+    dfrac = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -620, 40)
+    _lib.connect_material_expressions(wdm, "", dfrac, "A")
+    _lib.connect_material_expressions(_const(m, 1.0 / _OCN_DEPTH_RANGE_M, -760, 160), "", dfrac, "B")
+    depthFade = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, -480, 40)
+    _lib.connect_material_expressions(dfrac, "", depthFade, "")
+
+    # base colour: shallow -> deep by depth, -> foam white
+    body = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, -300, 0)
+    _lib.connect_material_expressions(_const3(m, *_OCN_SHALLOW, -480, -120), "", body, "A")
+    _lib.connect_material_expressions(_const3(m, *_OCN_DEEP, -480, -40), "", body, "B")
+    _lib.connect_material_expressions(depthFade, "", body, "Alpha")
+    base = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, -140, -40)
+    _lib.connect_material_expressions(body, "", base, "A")
+    _lib.connect_material_expressions(_const3(m, *_OCN_FOAMCOL, -300, 140), "", base, "B")
+    _lib.connect_material_expressions(foam, "", base, "Alpha")
+    _lib.connect_material_property(base, "", unreal.MaterialProperty.MP_BASE_COLOR)
+
+    # opacity: see-through near hull (shallow) -> opaque deep; foam fully opaque
+    op0 = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, -300, 300)
+    _lib.connect_material_expressions(_const(m, 0.5, -480, 280), "", op0, "A")
+    _lib.connect_material_expressions(_const(m, 0.97, -480, 360), "", op0, "B")
+    _lib.connect_material_expressions(depthFade, "", op0, "Alpha")
+    op = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, -140, 300)
+    _lib.connect_material_expressions(op0, "", op, "A")
+    _lib.connect_material_expressions(_const(m, 1.0, -300, 440), "", op, "B")
+    _lib.connect_material_expressions(foam, "", op, "Alpha")
+    _lib.connect_material_property(op, "", unreal.MaterialProperty.MP_OPACITY)
+
+    # roughness (low = crisp reflection) -> foam matte; specular; metallic; refraction
+    rough = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, -300, 560)
+    _lib.connect_material_expressions(_const(m, 0.03, -480, 540), "", rough, "A")
+    _lib.connect_material_expressions(_const(m, 0.85, -480, 620), "", rough, "B")
+    _lib.connect_material_expressions(foam, "", rough, "Alpha")
+    _lib.connect_material_property(rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
+    spec = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, -300, 700)
+    _lib.connect_material_expressions(_const(m, 0.5, -480, 680), "", spec, "A")
+    _lib.connect_material_expressions(_const(m, 0.3, -480, 760), "", spec, "B")
+    _lib.connect_material_expressions(foam, "", spec, "Alpha")
+    _lib.connect_material_property(spec, "", unreal.MaterialProperty.MP_SPECULAR)
+    _lib.connect_material_property(_const(m, 0.0, -300, 820), "", unreal.MaterialProperty.MP_METALLIC)
+    _lib.connect_material_property(_const(m, 1.05, -300, 880), "", unreal.MaterialProperty.MP_REFRACTION)
+
+    # emissive: Fresnel sky-reflection floor (never black) + sun glitter + foam glow
+    skyrefl = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -900, 900)
+    _lib.connect_material_expressions(_const3(m, *_OCN_SKY, -1060, 880), "", skyrefl, "A")
+    skf = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -1060, 1000)
+    _lib.connect_material_expressions(fres, "", skf, "A")
+    _lib.connect_material_expressions(_const(m, _OCN_SKY_STR, -1200, 1020), "", skf, "B")
+    _lib.connect_material_expressions(skf, "", skyrefl, "B")
+    foamglow = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -900, 1100)
+    _lib.connect_material_expressions(_const3(m, *_OCN_FOAMCOL, -1060, 1080), "", foamglow, "A")
+    fg2 = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -1060, 1180)
+    _lib.connect_material_expressions(foam, "", fg2, "A")
+    _lib.connect_material_expressions(_const(m, 0.22, -1200, 1200), "", fg2, "B")
+    _lib.connect_material_expressions(fg2, "", foamglow, "B")
+    emis = _lib.create_material_expression(m, unreal.MaterialExpressionAdd, -700, 980)
+    _lib.connect_material_expressions(skyrefl, "", emis, "A")
+    _lib.connect_material_expressions(foamglow, "", emis, "B")
+    glit = _ocean_glitter(m, -1100, 1320)
+    if glit is not None:
+        emis2 = _lib.create_material_expression(m, unreal.MaterialExpressionAdd, -540, 1000)
+        _lib.connect_material_expressions(emis, "", emis2, "A")
+        _lib.connect_material_expressions(glit, "", emis2, "B")
+        emis = emis2
+    sss = _ocean_sss(m, nrm, -1100, 1560)
+    if sss is not None:
+        emis3 = _lib.create_material_expression(m, unreal.MaterialExpressionAdd, -380, 1020)
+        _lib.connect_material_expressions(emis, "", emis3, "A")
+        _lib.connect_material_expressions(sss, "", emis3, "B")
+        emis = emis3
+    _lib.connect_material_property(emis, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    if _OCN_DEBUG_FOAM:  # DIAG: show the foam mask directly (red = foam coverage/magnitude)
+        dbg = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -540, 1500)
+        _lib.connect_material_expressions(foam, "", dbg, "A")  # DIAG: the final foam mask
+        _lib.connect_material_expressions(_const3(m, 4.0, 0.0, 0.0, -700, 1500), "", dbg, "B")
+        _lib.connect_material_property(dbg, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+
+    _lib.recompile_material(m)
+    unreal.EditorAssetLibrary.save_loaded_asset(m)
+    unreal.log("SeaShieldMaterials: M_Ocean built (from-scratch translucent-forward Gerstner ocean)")
+    return m
 
 
 def main():
