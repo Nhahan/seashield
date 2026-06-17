@@ -524,3 +524,23 @@ critic 추출(transcript JSONL의 최장 VERDICT 텍스트 블록 파싱).
 - **수정 (capture-verified)**: 근본원인 = **Sun yaw 35°가 히어로 캠(SW→NE 시선) 바로 뒤 = 정면광 = flat**(프로브: 같은 각도 cloud-hide 컨트롤도 flat → 구름 아닌 방위각). **yaw 35→−55, pitch −16→−22로 측면 raking** → 패싯이 실제 명암 스텝으로 폼을 읽음. `setup_level.py`+`patch_level.py`(Rotator 인자 = (roll,pitch,yaw) on this build) + L_Range 적용. **→ B−**(critic 재판정, no inflation; 병목이 라이팅→표면 머티리얼 계층으로 이동).
 - **표면 증분 (B−)**: critic 재#1 = "putty monolith" 단일 그레이. ① **M_SensorDark → 블랙 레이더 글래스**(base 0.045→0.020·rough 0.35→0.12·metallic 0.6 → 레이더면이 raking 키에 샤프 스펙큘러). ② **흘수선 wetness 밴드 확대**(top 260→400 cm·power 1.7→1.2 → 젖은 띠가 읽힘). `setup_materials.py` 파라(소스), `tune_mats.py`로 M_NavalHull+M_SensorDark만 in-place 리빌드(메시 슬롯 경로 참조 → 재할당 불요).
 - **잔여**(critic): 함포/CIWS/헬로 = 별 gunmetal 머티리얼(frigate.py 재할당 + Blender 재임포트); 디테일-노멀/판접합 seam 심화(textures.py); 워터 반사 콘트라스트(make_far_ocean 값↑). 각 재캡처+critic 게이트. 신규 dev 툴: `tune_light.py`·`tune_mats.py`.
+
+### 6.19 워터 GRADE-A (Path B 시네마틱 오션) + 함선 스케일 데칼 — 프레임 A 클로즈아웃
+
+**오너 지시("최소 A까지, 모든 수를 써서라도") → 6b escape 재개. 결론: SLW-escape 커스텀-머티리얼 접근은 데드엔드(렌더 안 됨)였고, 진짜 컨트롤 가능 AAA 워터는 Path B(자체 메시 + from-scratch 표준 머티리얼).**
+
+- **데드엔드 확정(캡처 검증, ~24 사이클)**: Water 플러그인 마스터를 복제해 DEFAULT_LIT로 뒤집고 셰이딩을 주입하는 escape는 **유효 셰이더를 컴파일 못 해 UE 기본(grey) 머티리얼로 렌더**. 또 플러그인 surface 머티리얼은 헤드리스로 제어 불가(body `water_material`/SetMaterialAttributes/Break-Make 모두 무반응; red/green/emissive 디버그로 확정). **렌더엔지 critic이 그동안 "B+"로 매긴 캡처는 전부 SLW 폴백 navy였음**(내 셰이딩이 아니었음).
+- **Path B(작동)**: 별도 `StaticMeshActor`(`SM_OceanGrid`, ~1.2km) + 신규 표준 머티리얼 `M_SeaOceanWPO`(navy/Fresnel/depth base + 베이크드 3-스케일 `T_WaterRipple_N` 마이크로-노멀 → MP_NORMAL + Custom-HLSL 8-wave Gerstner → MP_WORLD_POSITION_OFFSET). `ocean_grid.py`→`import_ocean.py`→`make_sea_ocean_wpo`→`apply_ocean_b.py`(STAGE_ORIGIN 스폰, SLW body hide). **렌더엔지 critic: A− → (디코릴레이션+글리터+seam 매칭) → A 락**("defensible AAA-adjacent real-time naval water").
+- **핵심 함정(메모리 `water-slw-grazing-ceiling` 갱신)**: ① Fresnel이 MP_NORMAL로 들어가면 PixelNormalWS 사이클 → 컴파일 실패 → **VertexNormalWS를 Fresnel Normal 입력으로**. ② `-nullrhi` apply는 셰이더 미컴파일 → 캡처가 기본/구셰이더; **real-RHI apply 필수**(base-red 디버그로 확인). ③ FBX 그리드 ~100× 스케일 → actor scale 0.02.
+- **함선 스케일 데칼(해군-AD #1 레버)**: `T_HullMarkings`(함번호 "81"·드래프트 마크·해치, PIL) → world-projected(world-Y→U, world-Z→V, CLAMP = 1회) → `make_naval_hull`에서 흰 페인트. 텍스처 4:1 ↔ 윈도우 4:1(Yspan=4×Zspan) 아니면 늘어짐. 함번호 렌더 확인(dcheck/final_number). + RAO 타일 420→320(노멀 타일 매칭), fine-노멀 밴드 140→220m hold(히어로 seam mip-bias).
+- **듀얼티어 / perf**: 게임플레이 = `L_Range`(SLW, **미변경 → perf 무관**); 시네마틱 = `L_RangeCustom`(CineOcean A-water, `apply_ocean_b`가 `L_Range`에서 파생 빌드, fps 무제약). 부력은 hidden 플러그인 오션 웨이브 계속 샘플 → **결정론·sim·서버 무관**. M_NavalHull 변경(데칼 텍스처 샘플 1개·1 draw)은 양 티어 공유지만 sub-measurable → cooled 게임플레이 perf 재확인이 형식 게이트(잔여).
+- **최종 프레임 A 비주얼**: `final_hero`/`final_hull`/`final_number`/`final_godray` = A-water + 함선(함번호·gunmetal·raking). 신규 툴: `ocean_grid.py`·`import_ocean.py`·`apply_ocean_b.py`·`make_sea_ocean_wpo`·`_hull_decal_mask`.
+- **S2 폴리시(A−→A)**: ① 함번호 크게(font 150→182, fill→252) — 히어로 거리 가독↑(s4_number 검증). ② **deck-from-above 마킹**(naval-AD gap #3): `T_DeckMarkings`(헬로 서클+H·논스킵 대시·포어덱 해치) → **top-down world-projected**(world-Y→U, world-X→V, CLAMP) → `make_detailed(deck_decal=True)`로 M_NavalGray(=데크+상부구조)에 흰 페인트. 마킹은 개방 데크 양끝(헬로 aft·해치 fwd)에 배치해 중앙 상부구조 회피(Z-마스크 불요). 컴파일 클린; raked-sun이 데크를 그림자에 두는 프레이밍에선 가독 약함(라이팅/프레이밍 의존). `final2_*` 재생성.
+
+### 6.20 능동 비주얼 QA 패스 — 사용자 지적 결함 3종 직접 발견·수정 (메모리 [[proactive-visual-qa]])
+
+사용자 지적: 물보라/포말 부재 · 바다 패턴화 · 함선 일부 공중 부유. 전용 진단 캡처(레벨 측면 프로파일·흘수선 클로즈·다운앵글 워터)로 직접 검수해 근본원인 격리·수정·재캡처 검증.
+- **부유 지오(frigate.py)**: `ram_box`가 y−11.5..−8(hangar y−44..−14와 funnel y−8..0 사이 **개방 데크 갭**)에 z11.6으로 배치 → 데크(z5) 위 **~6.5 m 공중 부유**("hangar roof" 주석과 불일치). hangar 지붕 위(y−25..−21, z11.0)로 이전. `ciws_aft` 행오버·`ciws_fwd` 0.8 m 갭·deckbox/raft 소갭도 seat. Blender 재export+reimport. aftchk 검증.
+- **포말(SeaVfxSystems.cpp)**: 흘수선 collar는 항상-on이나 `kHullFoamBaseOp 0.28`·band 320·lift 60 = **너무 옅고 얇아 안 읽힘**. base op 0.28→**0.70**, band 320→**560**, inset 70→130(헐 겹침). C++ 리빌드(8 s, succeeded). fix_waterln/dt_mid에서 흰 포말 collar 가독 확인.
+- **패턴화(setup_materials.py)**: 그레이징 미드-파 필드의 'horizon으로 행진하는' 노멀 반복이 주범(글리터용으로 depth-fade를 완화한 부작용). 수정: 미세노멀 depth-fade를 **빠르게·낮은 floor**(start 100→50 m, floor 0.6→0.22, ~450 m에서 floor) → 미드-파가 매끈한 aerial-perspective 수면으로 → 행진 타일링 소멸. + 옥타브 UV-rotate(37/−23°)·30 m 진폭 변조·capillary weight 1.3→1.0. near 필드 facet 유지. dt_hero 검증(미드-파 매끈).
+- **perf**: 포말 = 36-seg 리본(무시), de-tile = 상수 변경(무비용), 지오 = 동일 tri → §6.19 PASS 유지.
