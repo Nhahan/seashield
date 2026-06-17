@@ -20,6 +20,14 @@ TEXTURES = [
     # material to break the triplanar tile repeat on the hull (anti-tiling, P2-5).
     ("T_ShipDetail_N2.png", "T_ShipDetail_N2", "normal"),
     ("T_ShipDetail_RAO2.png", "T_ShipDetail_RAO2", "masks"),
+    # Ocean micro-surface normal (TRACK W) — sampled at 3 world scales in M_SeaOceanCustom
+    # to give the DEFAULT_LIT sea the high-frequency facets it needs for sun/sky glitter.
+    ("T_WaterRipple_N.png", "T_WaterRipple_N", "normal"),
+    # Hull-markings decal stencil (pennant number/draft marks/hatches) — world-projected once
+    # onto the bow topsides in M_NavalHull for human-scale reference (data map, not sRGB).
+    ("T_HullMarkings.png", "T_HullMarkings", "masks"),
+    # Deck-markings decal (helo circle/non-skid/hatches) — top-down world-projected once.
+    ("T_DeckMarkings.png", "T_DeckMarkings", "masks"),
     ("T_Smoke.png", "T_Smoke", "sprite"),
     ("T_Flash.png", "T_Flash", "sprite"),
 ]
@@ -50,6 +58,11 @@ def import_texture(path, name, kind):
         tex.set_editor_property("compression_settings",
                                 unreal.TextureCompressionSettings.TC_DEFAULT)
         tex.set_editor_property("srgb", True)
+    if name in ("T_HullMarkings", "T_DeckMarkings"):
+        # CLAMP addressing so the world-projected decal appears ONCE (black border outside [0,1]),
+        # not tiled across the hull/deck.
+        tex.set_editor_property("address_x", unreal.TextureAddress.TA_CLAMP)
+        tex.set_editor_property("address_y", unreal.TextureAddress.TA_CLAMP)
     unreal.EditorAssetLibrary.save_loaded_asset(tex)
     unreal.log(f"SeaShieldTextures: {name} ({kind}) imported")
     return tex

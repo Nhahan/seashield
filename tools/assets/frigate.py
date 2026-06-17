@@ -141,21 +141,24 @@ def details(lod):
     # floating forward of the deckhouse), aft on the hangar roof. Each box mount carries
     # a Phalanx-style ROUND radome drum + a stubby gun barrel, so it reads as an actual
     # close-in weapon system instead of a plain block.
-    add(lib.slanted_box("ciws_fwd", 26.5, 29.5, 3.0, 15.8, 17.4, slope_deg=16.0), gun)
-    add(lib.slanted_box("ciws_aft", -16.0, -13.0, 3.2, 11.2, 13.2, slope_deg=16.0), gun)
+    # CIWS mounts SIT ON real structure (no float): fwd on the bridge roof (spy/bridge tops ~z15),
+    # aft fully on the HANGAR roof (hangar = y -44..-14, roof z11.0). Were floating: fwd had an
+    # 0.8 m gap above the bridge, aft overhung the hangar edge.
+    add(lib.slanted_box("ciws_fwd", 26.5, 29.5, 3.0, 14.6, 16.2, slope_deg=16.0), gun)
+    add(lib.slanted_box("ciws_aft", -18.0, -15.0, 3.2, 11.0, 13.0, slope_deg=16.0), gun)
     add(lib.slanted_box("breakwater", 40.0, 41.4, 8.4, 6.3, 7.4, slope_deg=32.0), gray)
-    for tag, yy, zt in (("fwd", 28.0, 17.4), ("aft", -14.5, 13.2)):
+    for tag, yy, zt in (("fwd", 28.0, 16.2), ("aft", -16.5, 13.0)):
         add(lib.dome(f"ciws_{tag}_radome", 1.1, 12, (0.0, yy, zt), squash=0.85), gun)
         add(_smooth(lib.cylinder(f"ciws_{tag}_gun", 0.20, 1.7, 8, (0.0, yy + 0.5, zt + 0.5),
                                  pitch_deg=20.0)), dark)
     if lod <= 1:
         for i, (yy, cx) in enumerate(((8.0, -4.6), (8.0, 4.6), (-22.0, 0.0), (-30.0, 3.5))):
-            add(lib.slanted_box(f"deckbox{i}", yy, yy + 2.4, 1.5, 5.4, 6.4, slope_deg=8.0,
-                                center_x=cx), gray)
+            add(lib.slanted_box(f"deckbox{i}", yy, yy + 2.4, 1.5, 5.0, 6.0, slope_deg=8.0,
+                                center_x=cx), gray)  # z0 5.4->5.0: seat on deck (deck_z 5.0-5.3), no float gap
         for i, wx in enumerate((-0.7, 0.0, 0.7)):  # mast whip antennas
             add(lib.slanted_box(f"whip{i}", 14.5, 15.0, 0.16, 28.5, 31.8, slope_deg=1.5,
                                 center_x=wx), gray)
-        _greebles(add, gray, dark)
+        _greebles(add, gray, dark, gun)
         # Embarked helo on the aft flight deck (Wildcat-class silhouette) — a big
         # "modern frigate" read at the hero framing. Faceted like the rest of the ship:
         # boxy fuselage + dark canopy, tail boom + fin, and a low-poly main-rotor cross.
@@ -171,13 +174,13 @@ def details(lod):
         for i, yy in enumerate((16.0, 6.0, -4.0)):
             for sx in (-5.3, 5.3):
                 add(_smooth(lib.cylinder(f"raft_{i}_{'p' if sx < 0 else 's'}", 0.45, 1.5, 10,
-                                         (sx, yy, 5.75))), dark)
+                                         (sx, yy, 5.4))), dark)  # 5.75->5.4: bottom embeds the deck edge, no float
     if lod == 0:
         _railings(add, gray)
     return out
 
 
-def _greebles(add, gray, dark):
+def _greebles(add, gray, dark, gun):
     """Angular 'fitted-out warship' clutter — keeps the faceted language but adds the
     equipment density a real frigate carries, so the superstructure stops reading as a
     bare greybox: round SATCOM/nav radomes on the mast platform, funnel exhaust uptakes,
@@ -191,14 +194,15 @@ def _greebles(add, gray, dark):
     for sx in (-1.6, 1.6):
         add(lib.vcylinder("uptake", 0.32, 1.5, 8, (sx, -4.2, 12.2)), dark)
     # Foredeck ground tackle: a windlass box, two capstan drums, mooring bollards.
-    add(lib.slanted_box("windlass", 52.5, 54.5, 2.2, 6.9, 7.4, slope_deg=6.0), gray)
+    add(lib.slanted_box("windlass", 52.5, 54.5, 2.2, 6.9, 7.4, slope_deg=6.0), gun)  # P3-7.S2: machinery = gunmetal contrast (reads as a fitting, not hull)
     for sx in (-1.6, 1.6):
-        add(lib.vcylinder("capstan", 0.45, 0.8, 10, (sx, 55.6, 7.0)), gray)
+        add(lib.vcylinder("capstan", 0.45, 0.8, 10, (sx, 55.6, 7.0)), gun)
     for (yy, sx) in ((-6.0, -5.2), (-6.0, 5.2), (-25.0, -4.8), (-25.0, 4.8),
                      (-42.0, -4.5), (-42.0, 4.5)):
-        add(lib.vcylinder("bollard", 0.18, 0.7, 6, (sx, yy, 5.4), smooth=False), gray)
-    # Aft RAM/SeaRAM box launcher on the hangar roof (faceted, angled).
-    add(lib.slanted_box("ram_box", -11.5, -8.0, 3.0, 11.6, 13.4, slope_deg=20.0,
+        add(lib.vcylinder("bollard", 0.18, 0.7, 6, (sx, yy, 5.4), smooth=False), gun)
+    # Aft RAM/SeaRAM box launcher — SIT IT ON THE HANGAR ROOF (hangar y -44..-14, roof z11.0).
+    # Was at y -11.5..-8 in the OPEN-DECK gap between hangar and funnel -> floated ~6.5 m in the air.
+    add(lib.slanted_box("ram_box", -25.0, -21.0, 3.0, 11.0, 12.8, slope_deg=20.0,
                         end_slope_deg=10.0), dark)
     # RHIB rescue boat on a port-side cradle amidships (a small V-hull on a dark cradle).
     add(lib.slanted_box("rhib", 1.5, 7.0, 1.5, 5.7, 6.5, slope_deg=-14.0, center_x=-4.9), gray)
