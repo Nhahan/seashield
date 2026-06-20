@@ -580,6 +580,7 @@ void SimServer::handle_hello(net::TcpSession& transport, const protocol::ClientH
   }
   welcome.rain_intensity = weather.rain_intensity;
   welcome.gust_sigma_mps = weather.turbulence_intensity * weather.surface_wind_speed();
+  welcome.humidity = weather.humidity;
   transport.send(protocol::encode_control_frame(welcome));
   SS_LOG_INFO("session %llx: role %u attached to transport %llu",
               static_cast<unsigned long long>(session->token),

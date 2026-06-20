@@ -88,6 +88,7 @@ void ServerWelcome::encode(Writer& w) const {
   w.f32(static_cast<float>(surface_wind_north_mps));
   w.f32(static_cast<float>(rain_intensity));
   w.f32(static_cast<float>(gust_sigma_mps));
+  w.f32(static_cast<float>(humidity));
   w.u32(udp_nonce);
 }
 
@@ -103,10 +104,12 @@ std::optional<ServerWelcome> ServerWelcome::decode(Reader& r) {
   m.surface_wind_north_mps = r.f32();
   m.rain_intensity = r.f32();
   m.gust_sigma_mps = r.f32();
+  m.humidity = r.f32();
   m.udp_nonce = r.u32();
   // Negated comparisons so NaN payloads fail closed.
   if (!r.ok() || !valid_role(role) || m.weather_summary.size() > 512 ||
-      !(m.rain_intensity >= 0.0 && m.rain_intensity <= 1.0) || !(m.gust_sigma_mps >= 0.0)) {
+      !(m.rain_intensity >= 0.0 && m.rain_intensity <= 1.0) || !(m.gust_sigma_mps >= 0.0) ||
+      !(m.humidity >= 0.0 && m.humidity <= 1.0)) {
     return std::nullopt;
   }
   m.role = static_cast<Role>(role);

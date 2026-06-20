@@ -159,6 +159,7 @@ struct ServerWelcome {
   double surface_wind_north_mps = 0.0;
   double rain_intensity = 0.0;  // 0..1, same scale the radar attenuation uses.
   double gust_sigma_mps = 0.0;  // OU turbulence σ near the surface.
+  double humidity = 0.5;  // 0..1 relative humidity; drives the client's seed-random fog/sea-mist amount (already generated server-side in sim::Weather, display-only here).
   // Per-incarnation UDP binding nonce (v4) — the client echoes it in
   // UdpHello; see UdpHello::nonce.
   std::uint32_t udp_nonce = 0;

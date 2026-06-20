@@ -44,6 +44,7 @@ TEST(MessagesTest, ServerWelcomeRoundTripWithWeatherSummary) {
   welcome.surface_wind_north_mps = 4.25;
   welcome.rain_intensity = 0.3;
   welcome.gust_sigma_mps = 1.5;
+  welcome.humidity = 0.7;
 
   const auto decoded = control_round_trip(welcome);
   ASSERT_TRUE(decoded.has_value());
@@ -60,6 +61,7 @@ TEST(MessagesTest, ServerWelcomeRoundTripWithWeatherSummary) {
   EXPECT_DOUBLE_EQ(m->surface_wind_north_mps, 4.25);
   EXPECT_DOUBLE_EQ(m->rain_intensity, 0.3F);
   EXPECT_DOUBLE_EQ(m->gust_sigma_mps, 1.5);
+  EXPECT_DOUBLE_EQ(m->humidity, 0.7F);
 }
 
 TEST(MessagesTest, SnapshotAckRoundTrip) {
