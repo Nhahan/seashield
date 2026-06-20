@@ -274,11 +274,20 @@ def _apply_height_fog(fogc):
     model leaves FogInscatteringLuminance at black and lets the SkyAtmosphere ambient
     (SkyAtmosphereAmbientContributionColorScale = white) drive the fog colour/
     brightness — physically-based, naturally cool-tinted at the horizon, no magic
-    numbers. Cheap (no volumetric fog). Mirrored in patch_level.py."""
-    fogc.set_editor_property("fog_density", 0.028)        # P3-7d: a touch more horizon haze — soften the hard sea-sky seam
-    fogc.set_editor_property("fog_height_falloff", 0.12)
-    fogc.set_editor_property("start_distance", 72000.0)   # P3-7d: haze builds sooner on the far water (depth/aerial perspective)
-    fogc.set_editor_property("fog_max_opacity", 0.85)     # don't fully white-out the horizon
+    numbers. Cheap (no volumetric fog — that is cinematic-only). Mirrored in patch_level.py."""
+    # density + start are OVERRIDDEN at runtime by ASeaEnvironmentController from the seed weather; the
+    # CEILING/shape (no runtime setter) is set here: high max_opacity uncaps humid/rain murk; a higher
+    # falloff makes the fog low-lying (sea-mist 해무 hugging the water).
+    fogc.set_editor_property("fog_density", 0.028)        # initial; runtime-overridden per weather
+    fogc.set_editor_property("fog_height_falloff", 0.30)  # low-lying sea fog (was 0.12, taller column)
+    fogc.set_editor_property("start_distance", 72000.0)   # initial; runtime-overridden per weather
+    fogc.set_editor_property("fog_max_opacity", 0.92)     # uncap (was 0.85) -> humid/rain seeds build real murk
+    # NOTE: UE5.8 Fog Screen-Space Scattering (enable_fsss) AND volumetric god-ray fog are CINEMATIC-ONLY
+    # (set in apply_ocean.py on L_RangeCustom) — both add a GPU cost (a screen-space pass / a froxel grid)
+    # that the 1440p60 GAMEPLAY budget (thin headroom) can't safely spare, so the gameplay tier keeps the
+    # cheap analytic height fog. Gameplay weather still varies via the runtime density/start
+    # (ASeaEnvironmentController). Enabling gameplay volumetric fog needs a perf_capture opt-in + an
+    # L_Range rewrite (capture-verified: cinematic volumetric mist is dramatic; gameplay cost unmeasured).
 
 
 def _save():

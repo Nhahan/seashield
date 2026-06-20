@@ -45,6 +45,20 @@ r.VolumetricCloud.ReflectionRaySampleMaxCount=80
 r.DynamicGlobalIlluminationMethod=1
 r.ReflectionMethod=1
 r.Lumen.Reflections.DownsampleFactor=1
+# HQ Lumen reflections on translucency (UE5.8): lets a DEFERRED-surface (TLM_Surface) ocean mirror the
+# hull/sky. No-op for the default forward-shaded ocean; harmless. Capture tier only -> no gameplay cost.
+r.Lumen.Reflections.HQTranslucency=1
+#
+# --- UE5.8 atmospheric light scattering (the seed-random weather fog/sea-mist interacts with light):
+#     Fog Screen-Space Scattering (multiple-scattering through the height fog; default 1, explicit here;
+#     the fog component's enable_fsss gates it) + 64-sample SkyAtmosphere multi-scattering (vs 2). ---
+r.Fog.ScreenSpaceScattering=1
+r.SkyAtmosphere.MultiScatteringLUT.HighQuality=1
+# NOTE: a literal HULL mirror in the water is NOT achievable on this stack — the from-scratch ocean is
+# forward-shaded translucent, which receives neither Lumen nor SSR reflections (opaque-only), and the
+# PlanarReflection path (tested with r.AllowGlobalClipPlane=1 here) does not take on Metal forward water.
+# The ship is anchored instead by the foam collar + a subtle waterline contact-shadow (make_ocean) + the
+# wake/spray riding the matched Gerstner surface. (Same 'forward-water ceiling' family as the SLW dead-end.)
 #
 # --- Shadows: sharper directional virtual shadow maps for the hull/rigging. ---
 r.Shadow.Virtual.ResolutionLodBiasDirectional=-1.5

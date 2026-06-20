@@ -62,6 +62,24 @@ def _seam(size, period, halfwidth):
     return np.clip(gx + gy, 0.0, 1.0)
 
 
+def _strake(size, period, halfwidth, butt_mult=3):
+    """Horizontal plate STRAKES (rows at `period`) + SPARSE vertical butt-joints (every
+    butt_mult plates). Real welded hull plating runs as long horizontal strakes with occasional
+    vertical butts — NOT the square `_seam` grid, whose equal H+V crossings emboss into a dot/waffle
+    lattice under a strong detail-normal (techart A+ gate). Periodic when period|size and butt|size."""
+    c = np.arange(size)
+    dh = c % period
+    dh = np.minimum(dh, period - dh)
+    rows = (dh <= halfwidth).astype(np.float64)            # dense horizontal strake lines
+    bp = period * butt_mult
+    dv = c % bp
+    dv = np.minimum(dv, bp - dv)
+    cols = (dv <= halfwidth).astype(np.float64)            # sparse vertical butt joints
+    gy = np.broadcast_to(rows[:, None], (size, size))      # horizontal (varies by row)
+    gx = np.broadcast_to(cols[None, :], (size, size))      # vertical (varies by col)
+    return np.clip(gy + 0.7 * gx, 0.0, 1.0)
+
+
 def _plate_offsets(size, period, seed):
     """Per-plate constant height offset (plating that doesn't sit perfectly
     flush). Tileable because the plate grid aligns with the texture edges."""
@@ -259,7 +277,7 @@ def _ship_detail(seeds):
     # steel is DEAD-FLAT plate + a SHARP narrow deep butt-joint recess + a THIN proud weld bead.
     # Re-author to that: kill the broad doming (plate offsets ~0, fine high-freq tooth only) and
     # let crisp seams carry all the signal.
-    seam_major = _seam(SIZE, major, 3)   # THIN crisp butt-joint line — a narrow groove
+    seam_major = _strake(SIZE, major, 3)  # A+: horizontal STRAKES + sparse vertical butts (was a square grid -> dot/waffle); reads as plated steel, not studs
     seam_minor = _seam(SIZE, minor, 2)   # hairline sub-panel
     height = np.zeros((SIZE, SIZE))
     # P3-7e — the raised WELD-BEAD ring (P3-7c/d) framed every plate into a "button/rivet" tile,
@@ -267,9 +285,12 @@ def _ship_detail(seeds):
     # recessed seam LINE on a dead-flat plate field reads as architectural PANEL LINES, not
     # buttons. Moderate strength so the lines catch the rake without embossing the whole surface.
     height -= 0.70 * seam_major                                  # P3-7.4: deeper plate-butt recess (0.50->0.70) so seams cast a micro-shadow under the raked key
-    height -= 0.06 * seam_minor                                  # P3-7g: fainter sub-panels (naval-AD 4: the minor grid read as a "polka-dot" tiled decal — let the major plate lines dominate)
+    # A+/techart: minor sub-panel grid REMOVED from the NORMAL — crossing the major grid it embossed
+    # a polka-dot/quilt lattice once the material strength stack (tex 3.2 x material 1.7) amplified it.
+    # Sub-panels survive only as faint VALUE lines in RAO/AO below; the MAJOR plate lines now carry
+    # 100% of the normal relief -> crisp architectural panel lines, not dots.
     height += 0.006 * _norm01(_seamless_fbm(SIZE, 0.7, seeds["tooth"]))  # FINE tooth only (sandpaper)
-    normal = _height_to_normal(height, strength=2.8)            # P3-7.4: stronger relief (2.1->2.8) — plate/weld now reads as plated steel, not soft clay (raked light is ready to exploit it)
+    normal = _height_to_normal(height, strength=3.2)            # A+: major-only relief, pushed 2.8->3.2 so the clean plate lines read as plated steel at the hero distance
     # Roughness / AO / dirt.
     rough = np.full((SIZE, SIZE), 0.42)                           # painted-metal base
     rough += 0.22 * (_norm01(_seamless_fbm(SIZE, 2.3, seeds["weather"])) - 0.5) * 2.0

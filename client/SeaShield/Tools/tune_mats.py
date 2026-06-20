@@ -20,10 +20,12 @@ def main():
     sm.make_detailed("M_Gunmetal", (0.090, 0.100, 0.110), 0.30, 0.75, tile_cm=150.0)
     # S2 polish: rebuild M_NavalGray (deck + superstructure) WITH the top-down deck-markings decal
     # (helo circle / non-skid / hatches) so the main deck stops reading as an empty plane from above.
-    sm.make_detailed("M_NavalGray", (0.190, 0.205, 0.220), 0.6, 0.15, tile_cm=400.0, deck_decal=True)
-    sm.make_far_ocean()   # P3-7.2: lifted far-ocean reflection value (water contrast)
-    sm.make_sea_ocean()   # P3-7.4: grazing-roughness floor to calm the foreground mirror shards
-    unreal.log("SeaShieldMats: M_NavalHull + M_SensorDark + M_Gunmetal + M_FarOcean + MI_SeaOcean rebuilt")
+    sm.make_detailed("M_NavalGray", (0.122, 0.138, 0.152), 0.48, 0.15, tile_cm=180.0, deck_decal=True)  # A+ de-soap (sync with setup_materials.main)
+    # NOTE: do NOT rebuild M_FarOcean / MI_SeaOcean here — deleting/replacing those plugin-ocean
+    # materials triggers a Water-plugin WaterMeshComponent SIGSEGV (GetWaterMaterialRelevance on a
+    # force-replaced material). This is a SHIP-material iteration tool; the ocean is owned by
+    # apply_ocean.py (from-scratch M_Ocean). Keep it ship-only so the critic loop is crash-free.
+    unreal.log("SeaShieldMats: M_NavalHull + M_NavalGray + M_SensorDark + M_Gunmetal rebuilt (ship-only)")
 
 
 _state = {"phase": "build", "sec": 0.0, "h": None}
