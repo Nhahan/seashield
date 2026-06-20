@@ -229,7 +229,9 @@ client/SeaShield/Tools/showcase_shots.sh _after                    # 비평 4축
   `~/Library/Logs/Unreal Engine/LocalBuildLogs/Cook-*.txt`에서 `Error:`로 찾는다.
 - 패키징 빌드도 §3의 Sea* 플래그를 전부 받는다(검증·계측 절차 동일).
 
-## 7. 시연 영상
+## 7. 시연 영상 · 멀티클라 증명
+
+### 7.1 단일 클라 데모 영상
 
 ```sh
 client/SeaShield/Tools/record_demo.sh   # 원터치: 컴파일→서버→게임→녹화→인코딩
@@ -245,6 +247,53 @@ client/SeaShield/Tools/record_demo.sh   # 원터치: 컴파일→서버→게임
 - 캡처는 윈도우 크롬 포함(높이 +32 px) → 인코딩 단계에서 crop. 오프라인 프레임
   덤프(-DumpMovie)는 고정 타임스텝이라 실서버 스트림과 어긋나 이벤트 구동 VFX가
   디싱크되므로 **서버 동기 클라에는 부적합**.
+
+### 7.2 협동(멀티클라) 데모 영상
+
+```sh
+client/SeaShield/Tools/record_coop.sh [out.mp4]   # 1 서버 + 3 역할 UE 클라 + N 더미 → 4-패널 몽타주
+```
+
+- 한 서버에 **역할이 다른 UE 클라 3개**(Commander/Weapons/Observer)를 동시에 띄워
+  같은 교전을 보여주고, 여기에 **헤드리스 더미 클라 몇 개**를 같은 서버에 추가로
+  붙여(서버가 실제로 여러 클라를 받아 처리한다는 증거를 화면 밖에서도 늘린다)
+  스테이션 수를 키운다. **4번째 패널은 라이브 서버 로그 tail**(`role … attached` +
+  `transport … closed`)을 PIL 타이틀바 + ffmpeg `hstack`/`vstack` 파이프라인으로
+  합성 — 영상 자체가 멀티클라 처리의 자기증명이 된다. 하드 요구사항("여러 클라를
+  받아 처리하는 C++ 서버")의 **시각 증명**이자 P5 협동 DoD.
+- 캡처는 **반드시 순차(SCStream 하나씩)** — ScreenCaptureKit는 3개 스트림을 동시에
+  시작하면 `startCapture`가 영영 반환하지 않고 멈춘다. 클라는 `-SeaQuit`로 길게
+  살려 두므로 세 콘솔이 클립 전체에 살아 있고, 클립들은 같은 연속 교전의 몇 초
+  간격 샷이다.
+- **제약(7.1과 동일)**: 화면 기록 권한 + WindowServer 접근 셸 필요 →
+  **headless/ssh/샌드박스 셸에서는 실행 불가**(GUI/Screen-Recording 셸 전용).
+  서버 측 증명만 필요하면 §7.3을 쓴다.
+
+### 7.3 헤드리스 멀티클라 증명 (GUI 불필요)
+
+```sh
+scripts/multiclient_proof.sh            # 1 서버 + ~11 동시 소켓 → PASS/FAIL 자동 판정
+```
+
+- **완전 헤드리스·자기검증** — UE·GUI 없이 권위 sim 서버 하나를 띄우고 실제 C++
+  클라(`dummyclient`)를 동시에 다수 붙여, 서버 로그 + 각 클라의 자기보고를
+  **PASS/FAIL 평결**로 파싱한다. ctest 규율의 CLI 판이자, 하드 요구사항의 감사
+  가능한 증거. 네 가지를 실증한다:
+  1. **동시성** — 역할 3개 + 8-클라 부하 배치 = 한 순간 ~11 소켓. 피크는 서버
+     로그(`attached`/`closed`)를 시간순 재생해 재구성.
+  2. **역할 어태치** — commander/weapons/observer 각각 attach(무장석 1 + 관전 N).
+  3. **역할 배타성** — 두 번째 weapons 클라는 `kRoleTaken`으로 거부:
+     서버가 `transport N closed: handshake rejected`를 찍고 클라는 비정상 종료.
+  4. **느린 클라 격리** — netproxy로 UDP 경로를 손상시킨 클라는 다운링크가 손실로
+     열화(스냅샷 수↓·kbps↓)하지만 나머지 정상 클라는 계속 진행(graceful
+     degradation + 격리). **권위 있는 send-cap 축출**은
+     `SlowClientIsEvictedWithoutHarmingOthers` 통합 테스트로 별도 증명(스크립트가
+     `ctest -R`로 즉석 재실행). CLI 더미는 소켓을 즉시 읽으므로 라이브 send-cap
+     close를 스스로 유발하지 못함 — 이 점은 요약에 명시된다.
+- 유니크 고포트(tcp=7801/udp=7802/proxy=7903)로 다른 서버와 충돌 회피, `trap`으로
+  pid/포트매칭 정리(broad `pkill` 금지), 전체 180 s 하드 타임아웃 — **블라인드
+  대기 없음**. 산출물: `docs/reports/data/multiclient-proof.log`(전체 서버 로그) +
+  `multiclient-proof.summary.txt`(평결). 모든 검사 통과 시에만 exit 0.
 
 ## 8. 플랫폼 함정 카탈로그 (Metal / UE 5.7 — 전부 실증·격리됨)
 
