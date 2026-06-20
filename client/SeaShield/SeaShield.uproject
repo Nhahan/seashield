@@ -1,6 +1,6 @@
 {
 	"FileVersion": 3,
-	"EngineAssociation": "5.7",
+	"EngineAssociation": "5.8",
 	"Category": "Simulation",
 	"Description": "SeaShield CIC client — presentation layer over the authoritative simulation server (charter §7).",
 	"Modules": [

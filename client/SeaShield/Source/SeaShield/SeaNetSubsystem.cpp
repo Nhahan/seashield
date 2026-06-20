@@ -163,6 +163,9 @@ void USeaNetSubsystem::Disconnect()
 	Runnable = nullptr;
 	bWelcomed = false;
 	LatestSolutions.Empty();
+	EngagementLog.Reset();
+	FirstDesignateTick = -1;
+	LatestSnapshotTick = 0;
 }
 
 void USeaNetSubsystem::Deinitialize()
@@ -187,6 +190,7 @@ void USeaNetSubsystem::Tick(float DeltaTime)
 		Weather.WindCms = enu_to_ue(welcome.surface_wind_east_mps, welcome.surface_wind_north_mps, 0.0);
 		Weather.RainIntensity = static_cast<float>(welcome.rain_intensity);
 		Weather.GustSigmaMps = static_cast<float>(welcome.gust_sigma_mps);
+		Weather.Humidity = static_cast<float>(welcome.humidity);
 		UE_LOG(LogSeaShield, Display,
 		       TEXT("Welcomed: role=%d wind=(%.1f, %.1f) m/s rain=%.2f gust_sigma=%.2f"),
 		       static_cast<int32>(AssignedRole), welcome.surface_wind_east_mps,
@@ -218,6 +222,8 @@ void USeaNetSubsystem::Tick(float DeltaTime)
 			Interp = seashield::client::InterpolationBuffer{};
 			PendingShots.Reset();  // stale shots would compare against the new wave's target
 			LeadError = FSeaLeadError{};
+			EngagementLog.Reset();  // fresh wave: the AAR timeline starts over
+			FirstDesignateTick = -1;
 			break;
 		case protocol::EventKind::kRocketResolved:
 			if (event.killed)
@@ -258,6 +264,7 @@ void USeaNetSubsystem::Tick(float DeltaTime)
 		out.MissDistanceM = event.miss_distance_m;
 		out.bDetonated = event.detonated;
 		out.bKilled = event.killed;
+		EngagementLog.Add(out);  // retained for the AAR timeline / future replay
 		OnEngagementEvent.Broadcast(out);
 	}
 	protocol::Snapshot batch;
@@ -273,6 +280,7 @@ void USeaNetSubsystem::Tick(float DeltaTime)
 			}
 			// Acking switches this client to the delta stream (protocol v4).
 			Runnable->Session.ack_snapshot(done->tick);
+			LatestSnapshotTick = static_cast<int64>(done->tick);
 			Interp.push(MoveTemp(*done));
 		}
 	}
@@ -282,6 +290,7 @@ void USeaNetSubsystem::Tick(float DeltaTime)
 		if (auto done = Assembler.push_delta(delta_batch))
 		{
 			Runnable->Session.ack_snapshot(done->tick);
+			LatestSnapshotTick = static_cast<int64>(done->tick);
 			Interp.push(MoveTemp(*done));
 		}
 	}

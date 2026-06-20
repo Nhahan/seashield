@@ -1,0 +1,14 @@
+# THROWAWAY 날씨 검증 시나리오 — 맑음. 낮은 습도 + 강풍 -> fog/해무 거의 없음.
+# (P5.8 weather-driven fog/mist 검증용. 삭제해도 무방.)
+game_mode = 1
+game_lives = 3
+game_enemy_attack = 0
+snapshot_delta = 0
+weather_seed = 7
+sim_seed = 3
+gust_seed = 5
+duration_s = 60
+humidity = 0.25
+surface_wind_speed = 7.0
+surface_wind_from_deg = 240
+rain = 0.0

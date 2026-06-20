@@ -1,7 +1,9 @@
 #include "SeaEnvironmentController.h"
 
 #include "Components/ExponentialHeightFogComponent.h"
+#include "Components/LocalFogVolumeComponent.h"
 #include "Engine/ExponentialHeightFog.h"
+#include "Engine/LocalFogVolume.h"
 #include "EngineUtils.h"
 #include "Kismet/GameplayStatics.h"
 #include "Kismet/KismetMaterialLibrary.h"
@@ -44,6 +46,7 @@ void ASeaEnvironmentController::Tick(float DeltaTime)
 
 		ApplySeaState(CachedWeather);
 		ApplyFog(CachedWeather);
+		ApplySeaMist(CachedWeather);
 
 		if (WeatherParameters != nullptr)
 		{
@@ -69,10 +72,10 @@ void ASeaEnvironmentController::Tick(float DeltaTime)
 void ASeaEnvironmentController::ApplySeaState(const FSeaWeather& Weather) const
 {
 	AWaterBody* Ocean = nullptr;
-	for (TActorIterator<AWaterBody> It(GetWorld()); It; ++It)
+	TActorIterator<AWaterBody> OceanIt(GetWorld());  // first water body, if any (UE5.8 -Werror flags the old grab-then-break loop's unreachable ++It)
+	if (OceanIt)
 	{
-		Ocean = *It;
-		break;
+		Ocean = *OceanIt;
 	}
 	if (Ocean == nullptr)
 	{
@@ -113,24 +116,86 @@ void ASeaEnvironmentController::ApplySeaState(const FSeaWeather& Weather) const
 
 void ASeaEnvironmentController::ApplyFog(const FSeaWeather& Weather) const
 {
-	if (Weather.RainIntensity <= 0.0f)
+	TActorIterator<AExponentialHeightFog> FogIt(GetWorld());  // first height fog, if any (UE5.8 -Werror: unreachable ++It)
+	if (!FogIt)
 	{
-		return;  // Keep the level's clear-weather fog as authored.
+		return;
 	}
-	for (TActorIterator<AExponentialHeightFog> It(GetWorld()); It; ++It)
+	UExponentialHeightFogComponent* Fog = FogIt->GetComponent();
+	if (Fog == nullptr)
 	{
-		if (UExponentialHeightFogComponent* Fog = It->GetComponent())
+		return;
+	}
+	// The sky's moisture IS the visibility the fire-control problem loses, and it is
+	// seed-random per engagement (sim::Weather.humidity). Humid air hazes the distant
+	// horizon even with NO rain; rain thickens it into a near squall murk. 0.020 = the
+	// authored clear base. The Fog Screen-Space Scattering (enable_fsss, set in level
+	// setup) makes this fog physically scatter the sun/sky through it.
+	const float WindMps = Weather.WindCms.Size() / 100.0f;
+	const float Calm = 1.0f - FMath::Clamp(WindMps / 6.0f, 0.0f, 1.0f);
+	const float MistAmt = FMath::Clamp((Weather.Humidity - 0.40f) / 0.60f, 0.0f, 1.0f);  // 0 below 40% RH
+	// Calm humid air -> low sea fog that hugs the ship; rain -> a near squall murk. SeaFog pulls the
+	// veil in CLOSE (not just a distant horizon haze) so the weather is felt around the ownship.
+	const float SeaFog = FMath::Max(MistAmt * Calm, Weather.RainIntensity);
+	const float Density = 0.015f + 0.10f * MistAmt + 0.11f * Weather.RainIntensity;  // clear .015 -> mist ~.107 -> rain ~.16
+	Fog->SetFogDensity(Density);
+	Fog->SetStartDistance(FMath::Lerp(72000.0f, 6000.0f, SeaFog));  // clear 720 m horizon haze -> sea fog 60 m around the ship
+	// UE5.8 volumetric fog (enabled statically on the component in apply_ocean/setup_level) renders the
+	// near/mid mist as REAL 3D god-ray scattering — the low sun shafts THROUGH the 해무. The enable flag has
+	// no runtime setter, but the punch + phase do: drive them from the seed weather so humid/rain seeds
+	// scatter the sun hard (thick glowing mist) and clear seeds fade it to near-nothing. (These are no-ops
+	// if volumetric fog is off, e.g. a perf fallback — harmless.)
+	Fog->SetVolumetricFogExtinctionScale(FMath::Lerp(0.5f, 2.2f, SeaFog));        // clear ~0.5 -> heavy fog 2.2: denser scatter
+	Fog->SetVolumetricFogScatteringDistribution(FMath::Lerp(0.15f, 0.55f, MistAmt));  // humid calm air -> tighter forward sun glow
+	UE_LOG(LogSeaEnvironment, Display,
+	       TEXT("Fog applied: density %.3f start %.0f vol_ext %.2f (humidity %.2f, rain %.2f, calm %.2f)"),
+	       Density, FMath::Lerp(72000.0f, 6000.0f, SeaFog), FMath::Lerp(0.5f, 2.2f, SeaFog),
+	       Weather.Humidity, Weather.RainIntensity, Calm);
+}
+
+void ASeaEnvironmentController::ApplySeaMist(const FSeaWeather& Weather)
+{
+	// Sea mist / fog banks form in CALM, HUMID air over water (advection/radiation fog)
+	// and are torn apart by wind. A low Local Fog Volume (UE5.8) hugging the sea; its
+	// density is seed-random (humidity × calm), so each engagement draws a different
+	// morning. FogPhaseG forward-scatters the sun -> the mist glows toward the light.
+	const float WindMps = Weather.WindCms.Size() / 100.0f;
+	const float Calm = 1.0f - FMath::Clamp(WindMps / 6.0f, 0.0f, 1.0f);              // >6 m/s tears it away
+	const float Humid = FMath::Clamp((Weather.Humidity - 0.5f) * 2.5f, 0.0f, 1.0f);  // needs >0.5 RH
+	const float Mist = Humid * Calm;  // 0 = clear, 1 = thick sea fog
+
+	if (SeaMist == nullptr)
+	{
+		// Centre the low dome on the ocean surface (works for both the gameplay L_Range
+		// and the cinematic L_RangeCustom, which share the water body's stage position).
+		FVector Centre(0.0f, 0.0f, 0.0f);
+		TActorIterator<AWaterBody> WaterIt(GetWorld());
+		if (WaterIt)
 		{
-			// 0.02 is the engine default "clear" density; rain thickens the
-			// air toward a ~0.1 squall murk that genuinely eats the horizon.
-			const float Density = 0.02f + 0.08f * Weather.RainIntensity;
-			Fog->SetFogDensity(Density);
-			Fog->SetStartDistance(0.0f);
-			UE_LOG(LogSeaEnvironment, Display, TEXT("Rain fog applied: density %.3f (rain %.2f)"),
-			       Density, Weather.RainIntensity);
+			Centre = WaterIt->GetActorLocation();
 		}
-		break;
+		SeaMist = GetWorld()->SpawnActor<ALocalFogVolume>(Centre, FRotator::ZeroRotator);
 	}
+	if (SeaMist == nullptr)
+	{
+		return;
+	}
+	ULocalFogVolumeComponent* Vol = SeaMist->GetComponent();
+	if (Vol == nullptr)
+	{
+		return;
+	}
+	// Scale the COMPONENT (the AInfo root may not carry the actor scale into the fog) -> a wide, low mist
+	// SHEET over the sea (~4 km across, ~150 m tall), not a 5 m ball at the origin.
+	Vol->SetWorldScale3D(FVector(800.0f, 800.0f, 30.0f));
+	Vol->SetVisibility(Mist > 0.01f, true);
+	Vol->SetRadialFogExtinction(Mist * 1.2f);   // extinction >1 reads clearly
+	Vol->SetHeightFogExtinction(Mist * 2.0f);   // height-distributed -> hugs the surface
+	Vol->SetHeightFogFalloff(120.0f);           // a thick, visible mist layer (lower = larger transition)
+	Vol->SetFogPhaseG(0.6f);                    // forward scatter -> bright toward the sun
+	UE_LOG(LogSeaEnvironment, Display,
+	       TEXT("Sea mist applied: mist %.2f (humidity %.2f, wind %.1f m/s, calm %.2f)"),
+	       Mist, Weather.Humidity, WindMps, Calm);
 }
 
 void ASeaEnvironmentController::UpdateRain(float DeltaTime)

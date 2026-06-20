@@ -11,11 +11,22 @@
 #include "Widgets/SLeafWidget.h"
 
 namespace {
-constexpr float kPanelWidth = 560.0f;
-constexpr float kPanelHeight = 320.0f;
+constexpr float kPanelWidth = 600.0f;
+constexpr float kPanelHeight = 600.0f;
 constexpr float kRowHeight = 26.0f;
 constexpr float kPadX = 28.0f;
 constexpr float kPadY = 22.0f;
+
+// Format an integer sim tick (60 Hz) as a T+mm:ss.s mission-clock stamp,
+// relative to the first beat of the engagement (FirstTick).
+FString FormatTimelineStamp(int64 Tick, int64 ZeroTick)
+{
+	const float Secs = static_cast<float>(Tick - ZeroTick) / 60.0f;
+	const int32 Whole = FMath::Max(0, FMath::FloorToInt(Secs));
+	const int32 Mins = Whole / 60;
+	const float SecRemainder = Secs - static_cast<float>(Mins * 60);
+	return FString::Printf(TEXT("T+%02d:%04.1f"), Mins, SecRemainder);
+}
 }  // namespace
 
 // Centered AAR card painter.
@@ -65,6 +76,17 @@ public:
 		const TArray<FString>& Lines = Data->Lines();
 		for (int32 i = 0; i < Lines.Num(); ++i)
 		{
+			// An empty line is a section divider: a faint horizontal rule and a
+			// half-row of breathing space (used to set the TIMELINE apart).
+			if (i != 0 && Lines[i].IsEmpty())
+			{
+				Y += kRowHeight * 0.5f;
+				FSlateDrawElement::MakeLines(
+				    OutDrawElements, LayerId, AllottedGeometry.ToPaintGeometry(),
+				    {FVector2D(kPadX, Y - 4.0f), FVector2D(Size.X - kPadX, Y - 4.0f)},
+				    ESlateDrawEffect::None, Data->DimColor, true, 1.0f);
+				continue;
+			}
 			FSlateDrawElement::MakeText(
 			    OutDrawElements, LayerId + 1,
 			    AllottedGeometry.ToPaintGeometry(FVector2f(Size.X - 2.0f * kPadX, kRowHeight),
@@ -219,4 +241,105 @@ void USeaAfterActionWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 	                                static_cast<int32>(FMath::RoundToInt(WindBearing)),
 	                                Weather.RainIntensity * 100.0f));
 	CachedLines.Add(FString::Printf(TEXT("DURATION          %.0f S"), DurationS));
+
+	// --- Per-engagement timeline (charter §5.8 headline) -------------------
+	// Reconstructed from the retained event log on the subsystem, plus the
+	// client-local designation timestamp. Every tick is the 60 Hz sim clock, so
+	// the rows share one mission clock with the events.
+	const TArray<FSeaEngagementEvent>& Log = Net->GetEngagementLog();
+	int64 DetectTick = -1;     // first kTrackConfirmed (sensor lock)
+	int64 FireTick = -1;       // first kLaunch
+	int64 ResolveTick = -1;    // first kRocketResolved (rounds reach the target)
+	int64 KillTick = -1;       // first kTargetDestroyed
+	for (const FSeaEngagementEvent& E : Log)
+	{
+		switch (E.Kind)
+		{
+		case 4:  // kTrackConfirmed
+			if (DetectTick < 0) { DetectTick = E.Tick; }
+			break;
+		case 0:  // kLaunch
+			if (FireTick < 0) { FireTick = E.Tick; }
+			break;
+		case 1:  // kRocketResolved
+			if (ResolveTick < 0) { ResolveTick = E.Tick; }
+			break;
+		case 2:  // kTargetDestroyed
+			if (KillTick < 0) { KillTick = E.Tick; }
+			break;
+		default:
+			break;
+		}
+	}
+	const int64 DesignateTick = Net->GetFirstDesignateTick();
+	// Only a designation at/after the sensor lock is a meaningful "operator
+	// approves" beat. The auto-gunner can designate off a snapshot before the
+	// kTrackConfirmed reliable event lands, so a designate that precedes detect
+	// is an auto-play artifact — suppressed rather than rendered out of order.
+	const bool bDesignateSane = DesignateTick >= 0 && (DetectTick < 0 || DesignateTick >= DetectTick);
+
+	// Mission-clock zero = the earliest beat we will actually display, so every
+	// row renders at a non-negative T+ and the clock stays monotonic.
+	int64 ZeroTick = -1;
+	auto Earliest = [&ZeroTick](int64 T) { if (T >= 0 && (ZeroTick < 0 || T < ZeroTick)) { ZeroTick = T; } };
+	Earliest(DetectTick);
+	if (bDesignateSane) { Earliest(DesignateTick); }
+	Earliest(FireTick);
+	Earliest(ResolveTick);
+	Earliest(KillTick);
+	Earliest(FirstTick);
+
+	CachedLines.Add(TEXT(""));  // section divider
+	CachedLines.Add(TEXT("ENGAGEMENT TIMELINE"));
+	if (DetectTick >= 0)
+	{
+		CachedLines.Add(FString::Printf(TEXT("  %s  DETECT     track confirmed"),
+		                                *FormatTimelineStamp(DetectTick, ZeroTick)));
+	}
+	if (bDesignateSane)
+	{
+		CachedLines.Add(FString::Printf(TEXT("  %s  DESIGNATE  operator approves"),
+		                                *FormatTimelineStamp(DesignateTick, ZeroTick)));
+	}
+	if (FireTick >= 0)
+	{
+		CachedLines.Add(FString::Printf(TEXT("  %s  FIRE       first salvo away"),
+		                                *FormatTimelineStamp(FireTick, ZeroTick)));
+	}
+	if (KillTick >= 0)
+	{
+		CachedLines.Add(FString::Printf(TEXT("  %s  INTERCEPT  target destroyed"),
+		                                *FormatTimelineStamp(KillTick, ZeroTick)));
+	}
+	else if (ResolveTick >= 0)
+	{
+		CachedLines.Add(FString::Printf(TEXT("  %s  RESOLVE    rounds at target"),
+		                                *FormatTimelineStamp(ResolveTick, ZeroTick)));
+	}
+
+	// Reaction time = detect -> fire (the headline metric). If we captured the
+	// operator's designation, also split it detect -> approve -> fire.
+	CachedLines.Add(TEXT(""));  // section divider
+	if (DetectTick >= 0 && FireTick >= 0)
+	{
+		const float ReactionS = static_cast<float>(FireTick - DetectTick) / 60.0f;
+		CachedLines.Add(FString::Printf(TEXT("REACTION TIME     %.1f S  (detect -> fire)"), ReactionS));
+		if (bDesignateSane && DesignateTick <= FireTick)
+		{
+			const float DetectToApproveS = static_cast<float>(DesignateTick - DetectTick) / 60.0f;
+			const float ApproveToFireS = static_cast<float>(FireTick - DesignateTick) / 60.0f;
+			CachedLines.Add(FString::Printf(TEXT("  DETECT->APPROVE %.1f S   APPROVE->FIRE %.1f S"),
+			                                DetectToApproveS, ApproveToFireS));
+		}
+	}
+	else if (DesignateTick >= 0 && FireTick >= 0)
+	{
+		// No sensor-lock event captured: fall back to approve -> fire.
+		const float ReactionS = static_cast<float>(FireTick - DesignateTick) / 60.0f;
+		CachedLines.Add(FString::Printf(TEXT("REACTION TIME     %.1f S  (approve -> fire)"), ReactionS));
+	}
+	else
+	{
+		CachedLines.Add(TEXT("REACTION TIME     --"));
+	}
 }

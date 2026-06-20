@@ -1,6 +1,7 @@
 #include "SeaShieldGameModeBase.h"
 
 #include "Camera/CameraActor.h"
+#include "Camera/CameraComponent.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
@@ -254,9 +255,26 @@ void ASeaShieldGameModeBase::BeginPlay()
 			FParse::Value(FCommandLine::Get(), TEXT("SeaShotPitch="), CameraRotation.Pitch);
 			FParse::Value(FCommandLine::Get(), TEXT("SeaShotYaw="), CameraRotation.Yaw);
 			ACameraActor* Camera = GetWorld()->SpawnActor<ACameraActor>(CameraLocation, CameraRotation);
-			if (APlayerController* Controller = GetWorld()->GetFirstPlayerController())
+			if (Camera != nullptr)
 			{
-				Controller->SetViewTarget(Camera);
+				// Cinematic depth of field. UE5.8 auto-selects CircleDOF/DiaphragmDOF for the
+				// deferred path (Accumulation DoF is Movie-Render-Graph-only, not the real-time
+				// -SeaShot path). Focus on the ownship at the stage origin; the focal distance is
+				// the camera->ship range so the hull stays sharp while the near sea and far horizon
+				// fall gently out of focus.
+				if (UCameraComponent* Cam = Camera->GetCameraComponent())
+				{
+					FPostProcessSettings& PP = Cam->PostProcessSettings;
+					PP.bOverride_DepthOfFieldFocalDistance = true;
+					PP.DepthOfFieldFocalDistance =
+					    static_cast<float>((SeaWorldFrame::Origin - CameraLocation).Size());
+					PP.bOverride_DepthOfFieldFstop = true;
+					PP.DepthOfFieldFstop = 4.0f;  // subtle cinematic separation, not a toy-tilt-shift
+				}
+				if (APlayerController* Controller = GetWorld()->GetFirstPlayerController())
+				{
+					Controller->SetViewTarget(Camera);
+				}
 			}
 		}
 		ShotDelay = FMath::Max(ShotDelay, 0.5f);

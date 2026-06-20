@@ -57,6 +57,7 @@ struct FSeaWeather
 	UPROPERTY(BlueprintReadOnly, Category = "SeaShield") FVector WindCms = FVector::ZeroVector;  // UE frame.
 	UPROPERTY(BlueprintReadOnly, Category = "SeaShield") float RainIntensity = 0.0f;             // 0..1
 	UPROPERTY(BlueprintReadOnly, Category = "SeaShield") float GustSigmaMps = 0.0f;
+	UPROPERTY(BlueprintReadOnly, Category = "SeaShield") float Humidity = 0.5f;                  // 0..1; drives seed-random fog/sea-mist amount
 };
 
 USTRUCT(BlueprintType)
@@ -149,11 +150,30 @@ public:
 
 	// --- Weapons command state (operator fire order) ---
 	// Designation is the single source of truth here: the PPI writes it on
-	// click, the console reads it, the controller fires it.
+	// click, the console reads it, the controller fires it. The first designation
+	// of an engagement is also the operator's "approve" moment for the AAR
+	// reaction-time timeline (detect -> approve -> fire): we stamp it with the
+	// latest snapshot tick (same sim clock the engagement events carry).
 	UFUNCTION(BlueprintCallable, Category = "SeaShield")
-	void DesignateTrack(int32 TrackId) { DesignatedTrackId = TrackId; }
+	void DesignateTrack(int32 TrackId)
+	{
+		DesignatedTrackId = TrackId;
+		if (TrackId != 0 && FirstDesignateTick < 0)
+		{
+			FirstDesignateTick = LatestSnapshotTick;
+		}
+	}
 	UFUNCTION(BlueprintPure, Category = "SeaShield")
 	int32 GetDesignatedTrack() const { return DesignatedTrackId; }
+
+	// Sim tick at which the operator first designated a track this engagement
+	// (the AAR's "approve" beat); negative if no designation was captured.
+	int64 GetFirstDesignateTick() const { return FirstDesignateTick; }
+
+	// Full retained engagement-event log (cleared on kRoundStart / a new
+	// engagement). Lets the AAR reconstruct an exact tick-ordered timeline and
+	// keeps the door open for a future replay UI without a wire change.
+	const TArray<FSeaEngagementEvent>& GetEngagementLog() const { return EngagementLog; }
 
 	UFUNCTION(BlueprintCallable, Category = "SeaShield") void AdjustSalvo(int32 Delta);
 	UFUNCTION(BlueprintCallable, Category = "SeaShield") void AdjustDispersion(float DeltaMrad);
@@ -222,6 +242,9 @@ private:
 	FSeaWeather Weather;
 	TMap<int32, FSeaFireSolution> LatestSolutions;
 	int32 DesignatedTrackId = 0;
+	int64 LatestSnapshotTick = 0;    // last completed snapshot/delta tick (sim clock)
+	int64 FirstDesignateTick = -1;   // first operator designation this engagement (AAR)
+	TArray<FSeaEngagementEvent> EngagementLog;  // retained, in arrival order (AAR timeline)
 	int32 OrderSalvo = 8;            // rockets per salvo (1..16)
 	float OrderDispersionMrad = 3.0f;  // pattern spread (0..20)
 	float OrderAzTrimDeg = 0.0f;     // operator trim, server clamps to +-15

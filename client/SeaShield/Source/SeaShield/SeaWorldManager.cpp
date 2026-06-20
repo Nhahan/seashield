@@ -30,6 +30,8 @@ namespace {
 constexpr float kHullDraftCm = -40.0f;           // sit the waterline this far into the wave.
 constexpr float kBuoyancyZSpeed = 4.0f;          // FInterpTo speed for the bob (anti-jitter).
 constexpr float kBuoyancyTiltSpeed = 2.5f;       // FInterpTo speed for roll/pitch.
+constexpr float kBuoyancyFootprintRadiusCm = 5500.0f;  // ~hull half-length: heave = MEAN over the
+                                                       // footprint so sub-hull chop cancels (no cork-bob).
 }  // namespace
 
 ASeaWorldManager::ASeaWorldManager()
@@ -414,6 +416,10 @@ void ASeaWorldManager::Tick(float DeltaTime)
 				float WaveHeightCm = 0.0f;
 				FRotator WaveTilt = FRotator::ZeroRotator;
 				SurfaceSampler.SampleSeaSurface(ShipStage, WaveHeightCm, WaveTilt);
+				// Heave from the hull FOOTPRINT, not the single centre crest — a ~130 m frigate rides
+				// the mean over its length, so short chop cancels and only swells longer than the ship
+				// bob it. (Tilt stays the single-point, damped/clamped value above.)
+				WaveHeightCm = SurfaceSampler.SampleHullHeaveCm(ShipStage, kBuoyancyFootprintRadiusCm);
 
 				FRotator Pose = FrigateActor->GetActorRotation();
 				if (!Entity.Velocity.IsNearlyZero(50.0))  // >0.5 m/s of way on

@@ -60,6 +60,10 @@ struct FSeaSurfaceSampler
 	void SampleSeaSurface(const FVector& WorldXY, float& OutHeightCm, FRotator& OutTilt) const;
 	// World Z of the ocean surface at a world XY — pins wake / bow-wave foam to the swell.
 	float SeaSurfaceWorldZ(const FVector& WorldXY) const;
+	// Footprint-averaged wave height (cm) over a disk of `RadiusCm` about WorldXY. A long hull
+	// integrates the surface over its length, so sub-hull-length chop cancels and only swells
+	// longer than the ship heave it — the physical, calmer bob (single-point over-corks).
+	float SampleHullHeaveCm(const FVector& WorldXY, float RadiusCm) const;
 };
 
 // Rocket exhaust: camera-facing ribbons rebuilt per frame from each rocket's

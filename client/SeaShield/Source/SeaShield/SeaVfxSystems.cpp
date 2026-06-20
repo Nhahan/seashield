@@ -59,11 +59,15 @@ constexpr float kHullFoamSpeedOp = 0.22f;        // only a faint band when actua
 // Buoyancy: the visual hull rides the live Gerstner surface (server owns XY/heading).
 constexpr float kBuoyancyTiltDamp = 0.26f;       // a big hull rides the AVERAGE slope, not corks.
 // Hull-waterline spray puffs: small billboard ISM particles emitted where waves slap the hull.
-constexpr double kSprayLifeS = 0.7;              // puff lifetime (seconds).
-constexpr int32 kSprayMaxAlive = 130;            // global cap (translucent overdraw budget).
-constexpr float kSprayYoungHalfM = 0.9f;         // billboard half-size at spawn (metres).
-constexpr float kSprayWaveThreshCm = 25.0f;      // wave elevation above mean needed to emit (chop, not just big crests).
-constexpr int32 kSprayEmitPoints = 20;           // points sampled around the hull ellipse per tick.
+constexpr double kSprayLifeS = 0.9;              // puff lifetime (seconds) — linger a hair longer to read.
+constexpr int32 kSprayMaxAlive = 280;            // global cap (translucent overdraw budget; tiny billboards).
+constexpr float kSprayYoungHalfM = 0.85f;        // billboard half-size at spawn (metres); EmitSpray jitters it.
+constexpr float kSprayWaveThreshCm = 12.0f;      // wave elevation above mean needed to emit — lowered so even
+                                                 // modest chop slapping the hull throws spray (more continuous).
+constexpr float kSprayLapProb = 0.11f;           // always-on lapping trickle: a per-point chance to emit a fine
+                                                 // droplet EVEN below the chop threshold (water never dead-still
+                                                 // against a floating hull) — a steady, continuous waterline mist.
+constexpr int32 kSprayEmitPoints = 32;           // points sampled around the hull ellipse per tick (denser).
 constexpr double kSprayGravityCms2 = 981.0;      // downward acceleration (cm/s^2).
 constexpr float kBuoyancyTiltMaxDeg = 5.0f;      // clamp so it stays a stately warship roll.
 constexpr float kSeaDepthCm = 30000.0f;          // deep water for the wave query.
@@ -153,6 +157,36 @@ float FSeaSurfaceSampler::SeaSurfaceWorldZ(const FVector& WorldXY) const
 	FRotator UnusedTilt;
 	SampleSeaSurface(WorldXY, HeightCm, UnusedTilt);
 	return static_cast<float>(SeaWorldFrame::Origin.Z) + HeightCm;
+}
+
+float FSeaSurfaceSampler::SampleHullHeaveCm(const FVector& WorldXY, float RadiusCm) const
+{
+	// Integrate the wave height over the hull footprint — centre + two concentric rings (13 taps).
+	// Sub-hull-length chop averages to ~0; only swells longer than the ship survive, so the hull
+	// rides a stately heave instead of corking on every short crest the single-point sampler caught.
+	float Sum = 0.0f;
+	int32 Count = 0;
+	const auto AddTap = [&](float Dx, float Dy)
+	{
+		float H = 0.0f;
+		FRotator Unused;
+		SampleSeaSurface(FVector(WorldXY.X + Dx, WorldXY.Y + Dy, WorldXY.Z), H, Unused);
+		Sum += H;
+		++Count;
+	};
+	AddTap(0.0f, 0.0f);
+	const float Inner = RadiusCm * 0.5f;
+	for (int32 i = 0; i < 8; ++i)
+	{
+		const float A = (2.0f * PI) * (static_cast<float>(i) / 8.0f);
+		AddTap(RadiusCm * FMath::Cos(A), RadiusCm * FMath::Sin(A));
+	}
+	for (int32 i = 0; i < 4; ++i)
+	{
+		const float A = (2.0f * PI) * (static_cast<float>(i) / 4.0f) + 0.3927f;  // 22.5° offset
+		AddTap(Inner * FMath::Cos(A), Inner * FMath::Sin(A));
+	}
+	return Count > 0 ? Sum / static_cast<float>(Count) : 0.0f;
 }
 
 // ============================ FRocketTrailSystem ============================
@@ -1041,8 +1075,12 @@ void FWakeSystem::EmitSpray(double Now)
 		// Bow bias: emit more spray where the hull is cutting through water.
 		const float Bow = FMath::Cos(Ang) > 0.5f ? 2.0f : 1.0f;
 
-		if (Elev > kSprayWaveThreshCm && FMath::FRand() < 0.30f * Bow &&
-		    Sprays.Num() < kSprayMaxAlive)
+		// Emit on a chop slap (a wave crest against the hull) OR, less often, as an always-on lapping
+		// trickle so the waterline is never dead-still against a floating hull — together they read as
+		// continuous spray/mist rather than the old sparse crest-only bursts.
+		const bool bChop = Elev > kSprayWaveThreshCm && FMath::FRand() < 0.42f * Bow;
+		const bool bLap = FMath::FRand() < kSprayLapProb * Bow;
+		if ((bChop || bLap) && Sprays.Num() < kSprayMaxAlive)
 		{
 			FSpray S;
 			S.SpawnPos = FVector(Edge.X, Edge.Y, Surface->SeaSurfaceWorldZ(Edge) + 30.0f);
@@ -1053,9 +1091,13 @@ void FWakeSystem::EmitSpray(double Now)
 			{
 				R = Side;
 			}
-			S.Vel = R * FMath::FRandRange(120.0f, 260.0f) +
-			        FVector::UpVector * FMath::FRandRange(280.0f, 560.0f);
-			S.BaseHalfM = FMath::FRandRange(kSprayYoungHalfM * 0.7f, kSprayYoungHalfM * 1.3f);
+			// A chop slap throws a bigger, faster burst; a lapping droplet is finer + slower (mist).
+			const float SpeedUp = bChop ? FMath::FRandRange(280.0f, 620.0f) : FMath::FRandRange(150.0f, 320.0f);
+			const float SpeedOut = bChop ? FMath::FRandRange(140.0f, 280.0f) : FMath::FRandRange(70.0f, 150.0f);
+			S.Vel = R * SpeedOut + FVector::UpVector * SpeedUp;
+			const float SizeLo = bChop ? 0.7f : 0.45f;
+			const float SizeHi = bChop ? 1.3f : 0.8f;
+			S.BaseHalfM = FMath::FRandRange(kSprayYoungHalfM * SizeLo, kSprayYoungHalfM * SizeHi);
 			S.SpawnTime = Now;
 			const int32 Idx = SprayISM->AddInstance(
 			    FTransform(FQuat::Identity, S.SpawnPos, FVector(2.0f * S.BaseHalfM)), /*bWorldSpace=*/true);
