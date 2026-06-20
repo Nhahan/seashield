@@ -1,0 +1,42 @@
+================ SeaShield multi-client proof — SUMMARY ================
+scenario   : /Users/sunningkim/Desktop/seashield/scenarios/demo-fire.scn
+ports      : tcp=7801 udp=7802 proxy=7903
+
+[1] CONCURRENCY
+    peak concurrent attached transports : 12   (target >= 11)
+    total role attaches / closes / udp-binds : 13 / 14 / 13
+  PASS  concurrency peak >= 11 sockets
+
+[2] ROLE ATTACH (one armed seat + spectators)
+    commander : 15:49:20.210 INFO  session a1f609d2fe842211: role 1 attached to transport 1
+    weapons   : 15:49:20.210 INFO  session f9d4f4dd5a240382: role 2 attached to transport 2
+    observer  : 15:49:20.210 INFO  session 82998bba2b835561: role 0 attached to transport 3
+  PASS  all three roles attached
+
+[3] ROLE EXCLUSIVITY (second weapons -> kRoleTaken)
+    server    : 15:49:24.236 INFO  transport 12 closed: handshake rejected
+    rejected-handshake count : 1
+    second-weapons dummy exit: 1 (nonzero = rejected)
+  PASS  second weapons rejected (kRoleTaken)
+
+[4] SLOW-CLIENT ISOLATION
+    healthy fleet exits  : commander=0 weapons=0 observer=0 load(8x)=0
+  PASS  entire healthy fleet welcomed + advancing (exit 0)
+    direct-path observer   : snapshots=272 kbps=88.2 status=ok
+    degraded-path observer : snapshots=150 kbps=52.6  (via chaos proxy: loss .45 dup .1 delay 120ms jitter 120ms)
+  PASS  chaos-degraded downlink took fewer snapshots while direct stayed ok
+    eviction unit test     : 100% tests passed, 0 tests failed out of 1
+  PASS  authoritative send-cap eviction (SlowClientIsEvicted ctest)
+
+NOTE on the slow-client proof: the CLI dummy reads its socket promptly, so
+it does NOT itself trip the server's live send-cap close. The chaos-proxy
+run above proves GRACEFUL DEGRADATION + ISOLATION (the degraded client's
+downlink suffers loss while every healthy client keeps advancing). The
+rigorous server-side EVICTION (a never-reading client overflows its
+per-session SendQueue and is closed, leaving a healthy peer untouched) is
+proven by the SlowClientIsEvictedWithoutHarmingOthers integration test,
+run fresh above.
+
+RESULT: PASS — all four claims backed by real evidence.
+full server log: /Users/sunningkim/Desktop/seashield/docs/reports/data/multiclient-proof.log
+=======================================================================

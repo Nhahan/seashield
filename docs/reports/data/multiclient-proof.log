@@ -1,0 +1,47 @@
+15:49:20.205 INFO  sim server up: tcp=7801 udp=7802 duration=120s
+15:49:20.210 INFO  session a1f609d2fe842211: role 1 attached to transport 1
+15:49:20.210 INFO  session a1f609d2fe842211: udp bound
+15:49:20.210 INFO  session f9d4f4dd5a240382: role 2 attached to transport 2
+15:49:20.210 INFO  session f9d4f4dd5a240382: udp bound
+15:49:20.210 INFO  session 82998bba2b835561: role 0 attached to transport 3
+15:49:20.210 INFO  session 82998bba2b835561: udp bound
+15:49:20.211 INFO  session f06beb1d0ba156d3: role 0 attached to transport 4
+15:49:20.211 INFO  session 1ba0913e0632fcdd: role 0 attached to transport 5
+15:49:20.211 INFO  session 184f1c18aa71333: role 0 attached to transport 6
+15:49:20.211 INFO  session 891c8eb6e7aa4fbd: role 0 attached to transport 7
+15:49:20.211 INFO  session fffd4d4e795bd35d: role 0 attached to transport 8
+15:49:20.211 INFO  session 9715f2e5ee600d5d: role 0 attached to transport 9
+15:49:20.211 INFO  session e2c9c4bc9d0ccc9c: role 0 attached to transport 10
+15:49:20.211 INFO  session becc77ae84a7273c: role 0 attached to transport 11
+15:49:20.211 INFO  session f06beb1d0ba156d3: udp bound
+15:49:20.211 INFO  session 1ba0913e0632fcdd: udp bound
+15:49:20.211 INFO  session 184f1c18aa71333: udp bound
+15:49:20.211 INFO  session 891c8eb6e7aa4fbd: udp bound
+15:49:20.211 INFO  session fffd4d4e795bd35d: udp bound
+15:49:20.211 INFO  session 9715f2e5ee600d5d: udp bound
+15:49:20.211 INFO  session e2c9c4bc9d0ccc9c: udp bound
+15:49:20.211 INFO  session becc77ae84a7273c: udp bound
+15:49:24.236 INFO  transport 12 closed: handshake rejected
+15:49:24.756 INFO  session f85c7d0f0c4979d6: role 0 attached to transport 13
+15:49:24.756 INFO  session 939a2ab78c93d3d5: role 0 attached to transport 14
+15:49:24.756 INFO  session f85c7d0f0c4979d6: udp bound
+15:49:24.956 INFO  session 939a2ab78c93d3d5: udp bound
+15:49:26.759 WARN  sim thread fell behind by 537 ms; resyncing
+15:49:32.162 WARN  sim thread fell behind by 402 ms; resyncing
+15:49:34.758 INFO  transport 13 closed: peer closed
+15:49:35.105 INFO  transport 14 closed: peer closed
+15:49:37.572 WARN  sim thread fell behind by 410 ms; resyncing
+15:49:38.217 INFO  transport 4 closed: peer closed
+15:49:38.218 INFO  transport 2 closed: peer closed
+15:49:38.219 INFO  transport 7 closed: peer closed
+15:49:38.219 INFO  transport 3 closed: peer closed
+15:49:38.219 INFO  transport 8 closed: peer closed
+15:49:38.219 INFO  transport 6 closed: peer closed
+15:49:38.221 INFO  transport 11 closed: peer closed
+15:49:38.221 INFO  transport 10 closed: peer closed
+15:49:38.221 INFO  transport 9 closed: peer closed
+15:49:38.221 INFO  transport 5 closed: peer closed
+15:49:38.221 INFO  transport 1 closed: peer closed
+15:49:38.330 INFO  tick cost: avg=1438us max=551177us over-8ms=3/1006
+15:49:38.330 INFO  tick cost p99 <= 256us (hist bucket 8)
+15:49:38.330 INFO  sim server stopped: ticks=1006 snapshots=6248 events=189 commands=1
