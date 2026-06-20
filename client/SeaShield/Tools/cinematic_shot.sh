@@ -21,11 +21,11 @@
 # Output: client/SeaShield/Saved/Screenshots/MacEditor/SeaSeqNN.png (or SeaShot.png).
 set -u
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-UE="${UE:-/Users/Shared/Epic Games/UE_5.7}"
+UE="${UE:-/Users/Shared/Epic Games/UE_5.8}"
 PROJ="$ROOT/client/SeaShield/SeaShield.uproject"
 SHOTDIR="$ROOT/client/SeaShield/Saved/Screenshots/MacEditor"
 
-DUR=45; RESX=2560; RESY=1440; SCN=game.scn; PORT=7779; SP=0; IDLE=0
+DUR=45; RESX=2560; RESY=1440; SCN=game.scn; PORT=7779; SP=0; IDLE=0; AAR=0
 MODE=seq; SEQ=3; SHOT=0; CAM=""; MAP=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -38,6 +38,7 @@ while [ $# -gt 0 ]; do
     --sp) SP=$2; shift 2;;
     --scenario) SCN=$2; shift 2;;
     --idle) IDLE=1; shift;;
+    --aar) AAR=1; shift;;          # force the After-Action Review card on screen (-SeaShowAAR)
     --port) PORT=$2; shift 2;;
     *) echo "cinematic_shot: unknown arg $1" >&2; exit 2;;
   esac
@@ -65,6 +66,7 @@ sleep 1.5
 
 FLAGS=(-game -windowed "-ResX=$RESX" "-ResY=$RESY" -nosplash "-SeaServer=127.0.0.1:$PORT" -SeaCinematic "-dpcvars=$CVARS")
 if [ "$IDLE" = 1 ]; then FLAGS+=(-SeaRole=observer); else FLAGS+=(-SeaRole=solo -SeaGamePlay); fi
+[ "$AAR" = 1 ] && FLAGS+=(-SeaShowAAR)   # overlay the AAR card (needs an engagement: Launches>0)
 if [ "$MODE" = seq ]; then
   FLAGS+=("-SeaShotSeq=$SEQ" "-SeaShotSeqQuit=$DUR")
 else

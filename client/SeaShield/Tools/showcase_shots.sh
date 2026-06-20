@@ -9,7 +9,7 @@
 #   show_4_combat  -SeaShotOnBurst           intercept burst (gameplay)
 set -u
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-UE="${UE:-/Users/Shared/Epic Games/UE_5.7}/Engine/Binaries/Mac/UnrealEditor"
+UE="${UE:-/Users/Shared/Epic Games/UE_5.8}/Engine/Binaries/Mac/UnrealEditor"
 PROJ="$ROOT/client/SeaShield/SeaShield.uproject"
 SHOTDIR="$ROOT/client/SeaShield/Saved/Screenshots/MacEditor"
 CINE="$(grep -v '^[[:space:]]*#' "$(dirname "$0")/cinematic.cvars" | grep -v '^[[:space:]]*$' | tr -d '[:blank:]' | paste -sd, -)"

@@ -27,7 +27,7 @@
 # Env overrides: UE=<engine path>  PORT=<tcp port>
 set -u
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-UE="${UE:-/Users/Shared/Epic Games/UE_5.7}"
+UE="${UE:-/Users/Shared/Epic Games/UE_5.8}"
 PROJ="$ROOT/client/SeaShield/SeaShield.uproject"
 PORT=${PORT:-7777}
 

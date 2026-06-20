@@ -7,7 +7,7 @@
 set -u
 TAG="${1:-ocn}"
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-UE="${UE:-/Users/Shared/Epic Games/UE_5.7}"
+UE="${UE:-/Users/Shared/Epic Games/UE_5.8}"
 PROJ="$ROOT/client/SeaShield/SeaShield.uproject"
 T="$ROOT/client/SeaShield/Tools"
 SHOT="$ROOT/client/SeaShield/Saved/Screenshots/MacEditor"

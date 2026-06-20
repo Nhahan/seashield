@@ -20,7 +20,7 @@
 # therefore keys on over-budget%/p99, not the vsync-pinned avg.
 set -u
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-UE="${UE:-/Users/Shared/Epic Games/UE_5.7}"
+UE="${UE:-/Users/Shared/Epic Games/UE_5.8}"
 PROJ="$ROOT/client/SeaShield/SeaShield.uproject"
 
 DUR=30; RESX=2560; RESY=1440; SCN=game.scn; GPU=0; IDLE=0; PORT=7777; CVARS=""; CINE=0
