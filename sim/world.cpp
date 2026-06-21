@@ -32,6 +32,7 @@ World::World(const WorldConfig& config)
   ship_.position = config.ship.initial_position;
   ship_.heading_rad = config.ship.heading_rad;
   ship_.speed_mps = config.ship.speed_mps;
+  ship_.throttle = config.ship.throttle;  // held set-point (0 = legacy fixed platform)
 }
 
 void OwnShip::step(double dt_s) {

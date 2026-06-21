@@ -51,6 +51,7 @@ struct ShipParams {
   double max_speed_mps = 0.0;        // 0 = cannot accelerate (fixed platform).
   double accel_mps2 = 2.0;           // Throttle response toward the set-point.
   double turn_rate_max_rad_s = 0.0;  // 0 = cannot turn (fixed platform).
+  double throttle = 0.0;             // Initial held throttle 0..1 (0 = legacy fixed platform; keeps the ship making way).
 };
 
 // Integrated own-ship state. The launch point rides the deck and rockets

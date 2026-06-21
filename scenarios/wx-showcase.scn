@@ -1,0 +1,20 @@
+# THROWAWAY showcase scenario (P-water-vfx): moderate sea + the OWNSHIP MAKING WAY so the speed-driven
+# wake + bow spray actually fire (a stationary platform shows none of it). own_* keys default to the
+# legacy fixed platform, so this does NOT affect any other scenario's golden. Safe to delete.
+game_mode = 1
+game_lives = 3
+game_enemy_attack = 0
+snapshot_delta = 0
+weather_seed = 7
+sim_seed = 3
+gust_seed = 5
+duration_s = 60
+humidity = 0.55
+surface_wind_speed = 8.0
+surface_wind_from_deg = 210
+rain = 0.0
+# Ownship steaming NNE at ~7 m/s (13.6 kn) — drives the wake/bow-spray; trails the wake toward the SW hero cam.
+own_speed = 5.0
+own_max_speed = 6.0
+own_throttle = 1.0
+own_heading_deg = 30

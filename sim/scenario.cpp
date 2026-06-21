@@ -186,6 +186,14 @@ std::optional<Scenario> load_scenario_text(const std::string& text, std::string*
   cfg.target.speed_mps = kv.get_double("target_speed", 250.0);
   cfg.target.turn_rate_rad_s = math::deg_to_rad(kv.get_double("target_turn_rate_deg", 0.0));
 
+  // Own-ship way (optional; ALL default to the legacy fixed platform so existing scenarios + goldens
+  // are byte-identical). own_throttle + own_max_speed make the hull steam, which is what drives the
+  // client wake/bow-spray VFX (speed-proportional) — a stationary platform shows none of it.
+  cfg.ship.speed_mps = kv.get_double("own_speed", cfg.ship.speed_mps);
+  cfg.ship.max_speed_mps = kv.get_double("own_max_speed", cfg.ship.max_speed_mps);
+  cfg.ship.throttle = kv.get_double("own_throttle", cfg.ship.throttle);
+  cfg.ship.heading_rad = math::deg_to_rad(kv.get_double("own_heading_deg", math::rad_to_deg(cfg.ship.heading_rad)));
+
   // ASM maneuver profile (charter §5.3): range triggers default to 0 = off,
   // so legacy scenarios keep their exact behaviour.
   cfg.target.popup_range_m = kv.get_double("asm_popup_range_m", 0.0);
