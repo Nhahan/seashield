@@ -551,3 +551,24 @@ critic 추출(transcript JSONL의 최장 VERDICT 텍스트 블록 파싱).
 - **회귀수정(능동 QA, 6각 캡처 직접 판독)**: ① spray 빌보드 **흰 사각형** = 카메라-페이싱 쿼드가 수면/헐과 교차하며 직선 절단 → **soft-particle depth fade**(SceneDepth−PixelDepth, ~60cm)+제곱 라디얼 페더로 둥근 물방울(`make_spray`). ② whitecap/glitter **전면 블록 스티플** = 단일스케일+과대비 → foam 다중스케일(0.012×0.05)·threshold 0.50/gain 2.6, glitter 밀도↓·pow 160→260·×28→11(`make_ocean`/`_ocean_glitter`). ③ wake base_op 1.2→1.6·floor 0.30→0.45. **스펙트럼 불변 → C++ `SeaOceanWaves` 동기 유지(재덤프 불요)**. 캡처 검증: `ocn1_{hull,hero,godray,topdown,spray,glitter}` — 사각형0·블록0·glitter 로드 정상·spray 둥근 soft 퍼프. **perf 영향 0**(전부 머티리얼 노드/상수).
 - **멀티클라 헤드리스 증명**(`scripts/multiclient_proof.sh`): 1서버 **동시 12 transport**(3역할+8 옵저버 부하)·역할배타 `kRoleTaken`·카오스 저하·send-cap eviction ctest → 자동 PASS/FAIL(아티팩트 `docs/reports/data/multiclient-proof.*`, **재실행 독립검증 exit 0**). 서버측(네트워크) — 클라 perf 무관. `record_coop.sh`에 더미5+서버로그 4패널 확장(영상=GUI 1-커맨드, 런북 §7.2/7.3).
 - **AAR 타임라인+반응시간**(`SeaAfterActionWidget`): 교전 카드에 탐지→지정→발사→요격 `T+mm:ss.s` 타임라인 + 반응시간(보존 이벤트 로그 재구성, **프로토콜 무변경**). 발견·수정: 오토거너 pre-designation(이벤트 지연)이 음수 T+ 유발 → 미션제로=표시beat min + designate<detect 억제. 에디터 빌드 `Result: Succeeded`. UI 오버레이 — perf 무관. 캡처 검증 `aar_full2`.
+
+### 6.22 트래킹 히어로캠 + Niagara 공중 스프레이 (하이브리드 워터 VFX, 2026-06-21)
+
+- **트래킹 히어로캠**(`-SeaShotTrack`/`cinematic_shot.sh --track`, `SeaShieldGameModeBase`): 정적 쿼터뷰는 항행 함선을 놓침(focal/프레이밍이 함선=`Origin` 가정) → 반복 타이머가 라이브 자선(`SeaWorldManager::GetOwnshipActor`)을 매 프레임 look-at + 라이브 focal로 추적. `-SeaShotX/Y/Z`=ship-상대 오프셋. 캡처 전용 → perf/결정론 무관.
+- **Niagara 공중 스프레이**(`NS_Spray`, 헤드리스 선언적 저작 파이프라인 `build_niagara.py` → 런타임 `UNiagaraComponent`+`User.SprayRate` speed-구동): **전면 Niagara는 net-negative로 실증** — Niagara 스프레이가 그걸 대체한 레거시 ISM 플립북 스프레이보다 **perf·비주얼 둘 다 패배**(perf FLAG **over-33.3% 5.0% / p99 50 ms** vs 레거시 PASS p99 25 ms; 비주얼은 성긴 specks vs critic-검증 에어레이션 밴드). 리서치(SoT/AC:BF/Uncharted/Atlas)의 "AAA 물=머티리얼/RT 주력, 파티클은 공중 물만 / 이 프로젝트 시각 ROI 낮음" 예측이 그대로 실증.
+- **결정 = 하이브리드**: 레거시 mesh wake + bow + M_Ocean 머티리얼 포말(검증된 룩) + **Niagara는 공중 스프레이만**. 경량화(max spawn 320→130·size 70→55·lifetime 0.95→0.7·수선 thin-cylinder 스폰)로 **perf PASS 복귀: over-33.3% 0.1%·p99 25 ms·fps 56.9** (wx-showcase 이동함선+거친바다 worst-case, `perf_capture.sh --gpu`). 전부 클라 렌더 → **결정론 무영향, ctest 224/224 PASS**.
+- **엔진 함정(런북 §8 등재)**: lit-volumetric TRANSLUCENT 머티리얼을 **Niagara 스프라이트 정점팩토리**로 컴파일 시 Metal 셰이더 컴파일러 크래시 → Niagara 스프레이 머티리얼은 **UNLIT** 선-틴트(동일 머티리얼이 ISM 빌보드에선 정상). Niagara 인프라(저작 파이프라인)는 재현 가능 상태로 보존(향후 풀-Niagara 재방문 대비).
+
+### 6.23 게임플레이 오션을 from-scratch M_Ocean으로 통일 + 굴절 제거 경량 분기 (2026-06-21)
+
+직전까지 **두 갈래 오션**이 공존했다: 게임 기본 맵 `L_Range`는 **Water 플러그인 SLW**(`WaterBodyOcean`+`MI_SeaOcean`), from-scratch `M_Ocean`은 **캡처 전용 `L_RangeCustom`**(`apply_ocean.py`)에만. `cinematic_shot.sh`/`showcase_shots.sh`가 `--map` 없이 기본 맵을 띄우므로 **비주얼 캡처마저 SLW를 찍고 있었다**. 진단 캡처(저각 hero, 정지-함선 귀속 테스트)로 확인: 전경의 "찢어진 플라스틱+흰 스캘럽" 결함은 **SLW 고유**(근접 저각 near-mirror 반사가 골/뒷면을 검게, Jacobian 화이트캡이 날카로운 테두리) — from-scratch M_Ocean은 같은 앵글에서 깨끗. 게다가 C++ 부력/wake(`FSeaSurfaceSampler`)는 이미 **M_Ocean 스펙트럼(`SeaOceanWaves`)**을 샘플하므로 SLW를 렌더하면 "보이는 파도 ≠ 헐 부침" 잠재 불일치.
+
+- **통일**: `apply_ocean.py`를 env로 파라미터화(`SEA_TARGET_MAP`/`SEA_PLANAR`/`SEA_FOG_RETUNE`/`SEA_OCEAN_LITE`; 기본값은 기존 `L_RangeCustom` 경로 그대로 보존) → `SEA_TARGET_MAP=L_Range`로 **게임 기본 맵을 M_Ocean으로 결선**(SM_Ocean near patch + M_OceanFar far-skirt, 숨김 처리된 SLW WaterBody는 잔류). 부력↔보이는 파도 **동기 일치**. 렌더 전용 → 결정론/골든 무영향(**ctest 224/224 PASS**).
+- **perf 게이트 (`perf_capture.sh --gpu`, 1440p, gameplay 티어)**:
+  | 시나리오 | over-33.3% | p99 | 판정 |
+  |---|---|---|---|
+  | 풀 M_Ocean (굴절 ON) · game.scn | 4.0% | 63 ms | ❌ FLAG |
+  | **lite M_OceanGame (굴절 OFF)** · game.scn | **0.1%** | **20 ms** | ✅ PASS |
+  | **lite** · storm-asm (폭풍+전투) | **0.0%** | **18 ms** | ✅ PASS (60.0 fps) |
+- **경량 분기 = 굴절 제거**: ProfileGPU 귀속 — 풀 M_Ocean의 비용은 **Translucency 34.9% + Distortion(굴절) 10.9%** 지배. 오픈 딥오션엔 굴절할 배경이 없어 **굴절은 시각적으로 무비용**(A/B 캡처로 동일 확인)인데 전체화면 Distortion 패스를 띄움. `make_ocean(lite=True)`이 **MP_REFRACTION을 미연결**(→ Distortion 패스 자체 제거)한 게임플레이 트윈 `M_OceanGame`을 빌드, `L_Range`의 오션 메시에 결선. 단일 변경으로 p99 **63→20 ms**, over-33.3% **4.0→0.1%**, 100 ms 히치 **3→0**. 풀 M_Ocean(굴절)은 fps-무게이트 캡처 티어(`L_RangeCustom`)용으로 보존.
+- **게임플레이 자선은 정지가 불변**: 전 실게임 시나리오(game/calm-asm/crossing-asm/rain-asm/storm-asm/stress-500/wx-*)에 `own_speed` 없음 = 정지 사격 플랫폼(하드 요구사항). 항행(`own_speed=5`)은 **wx-showcase(캡처 전용, 시네마틱=fps 무제한)** 단 하나 → wake/spray는 게임플레이에 렌더되지 않으므로 게임플레이 perf 게이트의 worst-case는 정지 시나리오(game.scn/storm-asm, 둘 다 PASS).

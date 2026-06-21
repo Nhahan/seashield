@@ -38,6 +38,8 @@
 | 1+2′ | `Tools/reimport_frigate.py` | `SM_Frigate`만 재임포트 + 슬롯 재배정 | **빠른 함선 지오 반복용 단축** — 머티리얼 재생성/오션 참조를 안 건드림(설정상 `setup_materials` 풀 재실행은 `MI_SeaOcean`을 delete/recreate해 레벨 참조를 댕글시킴). frigate.py만 고쳤을 때 1·2 대신 사용 |
 | 3 | `Tools/setup_level.py` | `L_Range` 전체 재생성 | **파괴적**, 워터 settle 30 s |
 | 4 | `Tools/patch_level.py` | 기존 레벨 인플레이스 패치 | 멱등, 3의 재생성 회피용 |
+| 5 | `Tools/build_niagara.py` | `Content/.../VFX/NS_Spray` (Niagara 공중 스프레이) | **표준 -ExecCmds 아님** — 풀 에디터 + 저작-타임 에디터 브리지(별도 설치) 경유 선언적 저작. 멱등(재실행=재생성). 런타임은 1st-party Niagara만 의존. 수면 포말은 머티리얼(M_Ocean)+레거시 mesh wake가 담당, Niagara는 공중 스프레이만 |
+| 6 | `Tools/apply_ocean.py` (**real-RHI**, `-windowed` 비-nullrhi) | from-scratch 오션 결선(SM_Ocean near patch + M_OceanFar far-skirt, SLW WaterBody 숨김) | env로 타겟·변형 제어. **기본값 = 기존 throwaway `L_RangeCustom` 캡처맵 경로(무변경)**. `SEA_TARGET_MAP=/Game/SeaShield/Maps/L_Range` = **게임 기본 맵을 M_Ocean으로 통일**(부력↔보이는 파도 동기). `SEA_PLANAR=0` = PlanarReflection 생략(Metal forward-translucent엔 무효+per-frame 비용). `SEA_FOG_RETUNE=0` = 게임플레이 fog 유지(캡처용 god-ray 재튠 생략). `SEA_OCEAN_LITE=1` = **굴절 제거 게임플레이 트윈 `M_OceanGame`**을 오션 메시에 결선(Distortion 패스 제거 = 1440p60 게이트 통과). 통일 호출: `SEA_TARGET_MAP=…/L_Range SEA_PLANAR=0 SEA_FOG_RETUNE=0 SEA_OCEAN_LITE=1` (real-RHI라 translucent 셰이더 컴파일 필요 → `-windowed`, NOT `-nullrhi`). perf 근거 = perf-report §6.23 |
 
 에디터 파이썬 실행법(전 스크립트 공통):
 
@@ -78,6 +80,7 @@ HUD가 비어 보인다 — 버그가 아니라 게이팅 동작).
 | `-SeaShot=초` | 쿼터뷰 카메라 + 스크린샷 + (+3 s) 종료 | GameMode |
 | `-SeaShotX/Y/Z/Pitch/Yaw=` | 캡처 카메라 오버라이드 (스테이지 좌표) | GameMode |
 | `-SeaShotFromPawn` | 카메라 스폰 없이 함교(PlayerStart) 시점으로 촬영 | GameMode |
+| `-SeaShotTrack` | 캡처 카메라가 **항행 자선을 매 프레임 추적**(look-at + 라이브 focal). 정적 쿼터뷰는 이동 함선을 놓침(focal/프레이밍이 함선=Origin 가정). 이때 `-SeaShotX/Y/Z`는 ship-상대 오프셋, Pitch/Yaw는 무시(look-at이 산출). `cinematic_shot.sh --track` | GameMode |
 | `-SeaShotOnBurst` / `-SeaShotOnSplash` | 첫 기폭/착수 이벤트에 정렬된 캡처 (폴백 종료 100 s) | SeaWorldManager |
 | `-SeaTestBurst` | 합성 기폭+물기둥 1회 (비주얼 QA를 교전 운에서 분리) | SeaWorldManager |
 | `-SeaQuit=초` | **스크린샷 없이** 종료 — 계측 전용 (§5) | GameMode |
@@ -126,6 +129,9 @@ HUD가 비어 보인다 — 버그가 아니라 게이팅 동작).
 3. 이벤트 정렬이 필요한 장면(기폭·물기둥)은 타이머가 아니라
    `-SeaShotOnBurst/-SeaShotOnSplash`로 찍는다 — 런마다 부팅 선행시간이 달라
    고정 시각 캡처는 빗나간다.
+3b. **항행 중 함선의 히어로/wake 샷**은 `cinematic_shot.sh --track`(=`-SeaShotTrack`) — 정적
+   `--cam`은 이동 함선을 놓치므로(focal/프레이밍이 함선=Origin 가정), 트래킹 캠이 자선을 매
+   프레임 look-at + 라이브 focal로 따라간다. `--cam X,Y,Z`는 ship-상대 오프셋으로 해석.
 4. 에디터 오프스크린 캡처(`Tools/capture_level.py`, SceneCapture2D)는 레벨 검수용 —
    워터 인포 등 **실 파이프라인 검증은 반드시 인게임**(-game) 캡처로 한다
    (unattended 에디터는 뷰포트를 렌더하지 않아 HighResShot이 항상 검정).
@@ -312,6 +318,7 @@ scripts/multiclient_proof.sh            # 1 서버 + ~11 동시 소켓 → PASS/
 | 태양이 수평선 아래로 | `unreal.Rotator` 인자 순서는 (roll, pitch, yaw) | 캡처 루프로 검출 — 각도류는 반드시 렌더 검수 |
 | 라이팅 리빌드 배너 | Stationary 라이트 + 베이크 데이터 없음 | 전 라이트 Movable(완전 동적 — patch/setup_level.py) |
 | 일제사 직후 첫 VFX 히치 가능성 | 첫 드로우 시점 셰이더/PSO 컴파일 (frustum 밖 워밍업은 무효 — Metal은 그릴 때 만든다) | 부팅 시 카메라 앞 서브픽셀 스펙으로 전 교전 머티리얼 1회 드로우(WarmupVfx) |
+| Niagara 스프라이트 머티리얼 컴파일 중 에디터 크래시 | lit-volumetric TRANSLUCENT(`TLM_VOLUMETRIC_NON_DIRECTIONAL`) 머티리얼을 **Niagara 스프라이트 정점팩토리 퍼뮤테이션**으로 컴파일 → Metal 셰이더 컴파일러 크래시 | Niagara 스프라이트/리본 머티리얼은 **UNLIT**(선-틴트 emissive, splash/wake 경로와 동일)로. (동일 lit-volumetric이 **ISM 빌보드**(M_Spray·M_RocketTrail)에선 정상 — 정점팩토리 차이) |
 | 메시 치수 1/100 | FBX 단위 체인 | 생성기 `FBX_SCALE_ALL` + 임포트 치수 assert (import_assets.py) |
 | 1440p에서 7 fps, 워터가 GPU의 93% | 워터 품질 상향(tessellation 10·LODScaleBias +0.5·lod_scale 1.5)이 gerstner 쿼드트리 삼각형 폭증 → SingleLayerWater 121 ms(깊이 프리패스 40 + 드로우 81) | `r.Water.WaterMesh.TessFactorBias/-LODScaleBias/-LODCountBias`로 지오메트리 예산 축소(→~1.5 ms). 원거리 패턴 방지는 LOD가 아니라 MI_SeaOcean 머티리얼이 담당하므로 안전 (perf-report 클라 §) |
 | 네이티브가 아닌 ~60% 해상도로 렌더(흐릿) | 첫 실행 하드웨어 오토벤치가 (워터가 느릴 때) 로컬 `GameUserSettings`에 `sg.ResolutionQuality=0` 기입 → 스크린% ≈60 | `DefaultEngine.ini [SystemSettings] r.ScreenPercentage=100`(SystemSettings 우선순위가 scalability를 이김). TSR 업스케일 라인(`1552x873 -> 2560x1440`)으로 검출 |
