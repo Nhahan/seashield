@@ -16,6 +16,9 @@
 #include "Materials/MaterialInterface.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "ProceduralMeshComponent.h"
+#include "NiagaraComponent.h"
+#include "NiagaraFunctionLibrary.h"
+#include "NiagaraSystem.h"
 #include "UObject/ConstructorHelpers.h"
 #include "EngineUtils.h"  // TActorIterator
 #include "WaterBodyActor.h"
@@ -252,6 +255,26 @@ void ASeaWorldManager::BeginPlay()
 	WakeSystem->SetShipHalfLenCm(ShipHalfLenCm);
 	WreckageSystem = MakeUnique<FWreckageSystem>(this, TargetMesh);
 
+	// HYBRID water VFX: the wake/bow/hull-foam mesh stays on the legacy FWakeSystem (stable,
+	// validated look) + M_Ocean material foam; the AIRBORNE SPRAY is the one layer Niagara owns —
+	// NS_Spray (authored headlessly via Tools/build_niagara.py + Monolith), attached to the hull
+	// at the waterline and driven each tick from the hull's way via User.SprayRate. (NS_Wake the
+	// ribbon is intentionally NOT spawned — the legacy mesh wake covers it.)
+	if (FrigateActor.IsValid())
+	{
+		USceneComponent* const Attach = FrigateActor->GetRootComponent();
+		if (UNiagaraSystem* SpraySys = LoadObject<UNiagaraSystem>(
+		        nullptr, TEXT("/Game/SeaShield/VFX/NS_Spray.NS_Spray")))
+		{
+			SprayComp = UNiagaraFunctionLibrary::SpawnSystemAttached(
+			    SpraySys, Attach, NAME_None, FVector(0.0f, 0.0f, 0.0f),  // at the waterline
+			    FRotator::ZeroRotator, EAttachLocation::KeepRelativeOffset,
+			    /*bAutoDestroy=*/false, /*bAutoActivate=*/true);
+		}
+		UE_LOG(LogSeaShieldWorld, Display, TEXT("Niagara spray attached: spray=%d"),
+		       SprayComp != nullptr);
+	}
+
 	// Pre-warm the engagement VFX pipeline once the player view exists.
 	FTimerHandle WarmupTimer;
 	GetWorld()->GetTimerManager().SetTimer(WarmupTimer, this, &ASeaWorldManager::WarmupVfx,
@@ -471,8 +494,24 @@ void ASeaWorldManager::Tick(float DeltaTime)
 				FrigateActor->SetActorLocationAndRotation(FVector(ShipStage.X, ShipStage.Y, SmoothZ),
 				                                          Pose);
 			}
-			// Lay foam astern as the hull makes way (independent of the frigate mesh).
+			// HYBRID: legacy mesh wake + bow + hull-foam restored (validated, stable look); only the
+			// legacy ISM spray is retired (EmitSpray early-returns) — NS_Spray (Niagara) does the
+			// airborne spray. M_Ocean material foam stays.
 			WakeSystem->SampleWake(ShipStage, Entity.Velocity, Now);
+			// Drive the Niagara water VFX from the hull's way: spray + wake spawn rates
+			// scale with speed (zero on a stationary platform, like the legacy VFX).
+			{
+				const float SpeedFrac =
+				    FMath::Clamp(static_cast<float>(Entity.Velocity.Size2D()) / 1200.0f, 0.0f, 1.0f);
+				const bool bWay = SpeedFrac > 0.04f;
+				if (SprayComp != nullptr)
+				{
+					// Lighter than the legacy ISM spray it replaced (perf: keep over-33.3% at 0%).
+					SprayComp->SetVariableFloat(FName(TEXT("User.SprayRate")),
+					                            bWay ? FMath::Lerp(15.0f, 130.0f, SpeedFrac) : 0.0f);
+				}
+				// (NS_Wake ribbon not used in the hybrid — legacy mesh wake covers it.)
+			}
 			continue;
 		}
 
@@ -546,7 +585,7 @@ void ASeaWorldManager::Tick(float DeltaTime)
 	LastRebuildTrailsMs = (TVfx - TTrails) * 1000.0;
 	SplashSystem->Tick(Ctx);
 	ExplosionSystem->Tick(Ctx);
-	WakeSystem->Tick(Ctx);
+	WakeSystem->Tick(Ctx);  // legacy mesh wake + bow + hull-foam (hybrid); ISM spray off (EmitSpray early-return)
 	WreckageSystem->Tick(Ctx);
 	LastVfxUpdateMs = (FPlatformTime::Seconds() - TVfx) * 1000.0;
 }

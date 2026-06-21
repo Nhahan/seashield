@@ -43,7 +43,7 @@ constexpr float kWakeHalfWidthOldCm = 2600.0f;   // foam spreads astern.
 constexpr float kBowWaveAngleDeg = 22.0f;        // each wing's sweep back from the bow.
 constexpr float kBowWaveLenMinCm = 2500.0f;      // wing length at low / full speed.
 constexpr float kBowWaveLenMaxCm = 11000.0f;
-constexpr float kBowWaveBandCm = 650.0f;         // foam band half-width across each wing.
+constexpr float kBowWaveBandCm = 1050.0f;        // foam band half-width across each wing — a broad bow SHEET (was 650 = thin V).
 constexpr int32 kBowWaveSegments = 10;           // strip resolution per wing.
 // Hull foam collar: a thin foam ring hugging the hull waterline outline (an ellipse
 // from the ship pose + ShipHalfLenCm), pinned to the live surface like the wake. Faint
@@ -779,8 +779,9 @@ void FWakeSystem::Tick(const FSeaVfxContext& Ctx)
 	RebuildWake(Ctx.Now);
 	RebuildBowWave(Ctx.Now);
 	RebuildHullFoam(Ctx.Now);
-	EmitSpray(Ctx.Now);
-	UpdateSpray(Ctx.Now, Ctx.CamLoc);
+	// HYBRID: legacy ISM spray retired — NS_Spray (Niagara) handles the airborne spray now.
+	// EmitSpray(Ctx.Now);
+	// UpdateSpray(Ctx.Now, Ctx.CamLoc);
 }
 
 void FWakeSystem::SampleWake(const FVector& ShipStage, const FVector& VelCms, double Now)
@@ -1101,7 +1102,6 @@ void FWakeSystem::EmitSpray(double Now)
 		if ((bChop || bLap || bBow) && Sprays.Num() < kSprayMaxAlive)
 		{
 			FSpray S;
-			S.SpawnPos = FVector(Edge.X, Edge.Y, Surface->SeaSurfaceWorldZ(Edge) + 30.0f);
 			// Outward radial direction in the horizontal plane.
 			FVector R = EdgeOffset;
 			R.Z = 0.0f;
@@ -1109,6 +1109,13 @@ void FWakeSystem::EmitSpray(double Now)
 			{
 				R = Side;
 			}
+			// JITTER the spawn off the fixed 32-point ring so the spray doesn't read as an equidistant
+			// "conveyor belt" of identical puffs (critic): scatter along the hull tangent + in/out + up.
+			const FVector Tang = FVector::CrossProduct(R, FVector::UpVector).GetSafeNormal();
+			S.SpawnPos = FVector(Edge.X, Edge.Y, Surface->SeaSurfaceWorldZ(Edge) + 30.0f) +
+			             Tang * FMath::FRandRange(-360.0f, 360.0f) +
+			             R * FMath::FRandRange(-120.0f, 180.0f) +
+			             FVector(0.0f, 0.0f, FMath::FRandRange(0.0f, 70.0f));
 			// A slap / bow sheet throws a bigger, faster burst carried forward off the bow by the ship's
 			// way; a lapping droplet is finer + slower (mist that lingers at the waterline).
 			const float SpeedUp = bBig ? FMath::FRandRange(300.0f, 680.0f) : FMath::FRandRange(150.0f, 320.0f);

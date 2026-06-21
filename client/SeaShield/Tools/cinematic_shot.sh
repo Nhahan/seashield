@@ -13,6 +13,10 @@
 #              (-SeaShotSeq, default mode, I=3).
 #   --shot T   a single hero still at T s from the standard quarter view
 #              (-SeaShot) instead of a filmstrip.
+#   --track    truck the camera WITH the steaming ownship (look-at + live focal),
+#              so a moving frigate stays framed + tack-sharp. With --track, --cam's
+#              X,Y,Z become a SHIP-RELATIVE offset and its Pitch/Yaw are ignored
+#              (the look-at computes rotation). Use for wake/bow hero shots.
 #   --sp PCT   supersample: internal render scale PCT% (overrides the tier's
 #              100, e.g. 150 for print-grade stills). Cinematic only — costs fps.
 #   --dur N    total run seconds (default 45; the run quits after).
@@ -26,13 +30,14 @@ PROJ="$ROOT/client/SeaShield/SeaShield.uproject"
 SHOTDIR="$ROOT/client/SeaShield/Saved/Screenshots/MacEditor"
 
 DUR=45; RESX=2560; RESY=1440; SCN=game.scn; PORT=7779; SP=0; IDLE=0; AAR=0
-MODE=seq; SEQ=3; SHOT=0; CAM=""; MAP=""; FOV=""
+MODE=seq; SEQ=3; SHOT=0; CAM=""; MAP=""; FOV=""; TRACK=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --seq) MODE=seq; SEQ=$2; shift 2;;
     --shot) MODE=shot; SHOT=$2; shift 2;;
-    --cam) CAM=$2; shift 2;;       # hero framing "X,Y,Z,Pitch,Yaw" (stage coords) for --shot
+    --cam) CAM=$2; shift 2;;       # hero framing "X,Y,Z,Pitch,Yaw" (stage coords; with --track X,Y,Z = ship-relative offset) for --shot
     --fov) FOV=$2; shift 2;;       # telephoto lens FOV in degrees (narrow = visible DoF bokeh)
+    --track) TRACK=1; shift;;      # follow the steaming ownship (look-at + live focal) — for --shot
     --map) MAP=$2; shift 2;;       # load a non-default map (e.g. /Game/SeaShield/Maps/L_RangeProbe)
     --dur) DUR=$2; shift 2;;
     --res) RESX=${2%x*}; RESY=${2#*x}; shift 2;;
@@ -81,6 +86,7 @@ else
     [ -n "$cyaw" ] && FLAGS+=("-SeaShotYaw=$cyaw")
   fi
   [ -n "$FOV" ] && FLAGS+=("-SeaShotFOV=$FOV")   # telephoto lens -> visible DoF bokeh
+  [ "$TRACK" = 1 ] && FLAGS+=("-SeaShotTrack")   # truck the camera with the steaming ownship
 fi
 FLAGS+=("-abslog=$ABSLOG")
 

@@ -12,6 +12,8 @@ class UMaterialInterface;
 class UProceduralMeshComponent;
 class UInstancedStaticMeshComponent;
 class UWaterBodyComponent;
+class UNiagaraComponent;
+class UNiagaraSystem;
 
 // Reconciles the interpolated entity sample into spawned actors each frame
 // (charter §7 "스냅샷 → 보간 버퍼 → 액터 트랜스폼"). Per kind: a Blueprint
@@ -71,6 +73,11 @@ public:
 
 	UFUNCTION()
 	void HandleEngagementEvent(const FSeaEngagementEvent& Event);
+
+	// The live, server-driven ownship hull (the kOwnShip-driven FrigateActor), for
+	// capture/camera code that must frame the steaming ship (e.g. -SeaShotTrack hero
+	// shots). Null until located at BeginPlay, or if the stage has no frigate.
+	AActor* GetOwnshipActor() const { return FrigateActor.Get(); }
 
 private:
 	TSubclassOf<AActor> ClassFor(ESeaEntityKind Kind) const;
@@ -137,7 +144,14 @@ private:
 	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> SmokeISM;   // puffs (M_RocketSmoke)
 	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> DebrisISM;  // sparks (M_Debris)
 	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> FlashISM;   // muzzle/burst (M_Muzzle)
-	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> SprayISM;   // hull spray (M_Spray)
+	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> SprayISM;   // hull spray (M_Spray) — legacy, being replaced by NS_Spray
+
+	// Water-VFX Niagara systems (authored headlessly via Tools/build_niagara.py + Monolith),
+	// attached to the ownship hull and driven each tick from the hull's way via the
+	// User.SprayRate / User.WakeRate parameters. Spray = lit sprite spray at the waterline;
+	// Wake = world-space foam ribbon trailing astern.
+	UPROPERTY() TObjectPtr<UNiagaraComponent> SprayComp;
+	UPROPERTY() TObjectPtr<UNiagaraComponent> WakeComp;
 	// Last seen stage position/velocity per entity — lets a kill spawn its burst +
 	// wreckage at the target's last pose and inherit its motion EVEN THOUGH reconcile
 	// may already have destroyed the actor (the kill event and the snapshot drop race

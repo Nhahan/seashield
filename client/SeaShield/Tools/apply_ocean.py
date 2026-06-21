@@ -12,7 +12,20 @@ import setup_materials as sm
 
 STAGE_ORIGIN = unreal.Vector(300000.0, 300000.0, 0.0)
 CUSTOM_MAP = "/Game/SeaShield/Maps/L_RangeCustom"
-PLANAR = True  # translucent-forward validated; probe planar reflection (Metal stability)
+# Target map. DEFAULT = the THROWAWAY capture map (ocean_iter.sh path — unchanged). Set
+# SEA_TARGET_MAP=/Game/SeaShield/Maps/L_Range to UNIFY the gameplay map onto the from-scratch
+# M_Ocean so the VISIBLE waves match what buoyancy/wake already sample (FSeaSurfaceSampler reads
+# SeaOceanWaves analytically — render-only, determinism/golden untouched).
+TARGET_MAP = os.environ.get("SEA_TARGET_MAP", CUSTOM_MAP)
+# PlanarReflection is visually INERT on the Metal forward/deferred-translucent water (capture-
+# verified) yet still costs a per-frame scene re-capture -> OFF for the gameplay unify (SEA_PLANAR=0).
+PLANAR = os.environ.get("SEA_PLANAR", "1") == "1"
+# The fog re-tune (uncap max-opacity + volumetric god-ray mist) is a CAPTURE-look pass; the gameplay
+# map already carries its weather-driven fog, so SEA_FOG_RETUNE=0 leaves the gameplay fog intact.
+FOG_RETUNE = os.environ.get("SEA_FOG_RETUNE", "1") == "1"
+# SEA_OCEAN_LITE=1 surfaces the GAMEPLAY-lite ocean (M_OceanGame: no refraction -> no Distortion pass)
+# on the spawned ocean mesh; the full M_Ocean (refraction) is still built so L_RangeCustom captures keep it.
+OCEAN_LITE = os.environ.get("SEA_OCEAN_LITE", "0") == "1"
 
 
 def main():
@@ -30,7 +43,10 @@ def main():
         unreal.MaterialEditingLibrary.connect_material_property(black, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
         unreal.MaterialEditingLibrary.recompile_material(far)
         unreal.EditorAssetLibrary.save_loaded_asset(far)
-    mat = sm.make_ocean()
+    mat = sm.make_ocean()  # full (cinematic, refraction) — always built so L_RangeCustom keeps it
+    if OCEAN_LITE:
+        mat = sm.make_ocean("M_OceanGame", lite=True)  # gameplay twin (no refraction) -> used on the ocean mesh
+        unreal.log("SeaShieldOcean: gameplay-lite ocean (M_OceanGame, no refraction) selected")
     sm.make_wake()  # refresh the foam-ribbon material (wake/bow/hull-collar) with the organic breakup
     sm.make_spray()  # hull-waterline spray puff ISM material
     far_mat = sm.make_far_skirt()  # opaque/unlit far-distance sheet -> extends MY ocean to the horizon
@@ -118,7 +134,7 @@ def main():
     # max-opacity, and cool the sky-ambient tint to a dim blue so what haze remains reads as ocean-distance
     # aerial perspective rather than a pale wash.
     fog = by_label.get("HeightFog")
-    if fog is not None:
+    if fog is not None and FOG_RETUNE:
         try:
             fc = fog.get_component_by_class(unreal.ExponentialHeightFogComponent)
             # NOTE: density + start_distance are OVERRIDDEN at runtime by ASeaEnvironmentController from
@@ -202,11 +218,13 @@ def main():
     # -----------------------------------------------------------------------------------------------
 
     world = (ocean or sma).get_world()
-    if unreal.EditorAssetLibrary.does_asset_exist(CUSTOM_MAP):
+    # Throwaway capture map: delete any stale copy first (Save-As from the loaded L_Range world).
+    # In-place unify (TARGET_MAP == the loaded L_Range): save_map overwrites — never delete L_Range.
+    if TARGET_MAP == CUSTOM_MAP and unreal.EditorAssetLibrary.does_asset_exist(CUSTOM_MAP):
         unreal.EditorAssetLibrary.delete_asset(CUSTOM_MAP)
-    if not unreal.EditorLoadingAndSavingUtils.save_map(world, CUSTOM_MAP):
-        raise RuntimeError("save_map L_RangeCustom failed")
-    unreal.log("SeaShieldOcean: L_RangeCustom saved (M_Ocean); L_Range untouched")
+    if not unreal.EditorLoadingAndSavingUtils.save_map(world, TARGET_MAP):
+        raise RuntimeError(f"save_map {TARGET_MAP} failed")
+    unreal.log(f"SeaShieldOcean: {TARGET_MAP} saved (M_Ocean){'' if TARGET_MAP != CUSTOM_MAP else '; L_Range untouched'}")
 
 
 _state = {"phase": "build", "sec": 0.0, "h": None}

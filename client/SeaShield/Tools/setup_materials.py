@@ -1386,6 +1386,138 @@ def make_wake():
     return m
 
 
+def make_spray_sprite():
+    """Niagara SPRITE-spray material (NS_Spray). UNLIT translucent (sun-tinted emissive) — NOT
+    lit-volumetric: the lit-volumetric translucent permutation on a Niagara sprite vertex factory
+    crashed the Metal shader compiler in-editor, so this uses the same stable unlit-emissive path
+    as the splash/burst/wake materials. Soft round feather alpha + soft-particle depth fade dissolve
+    it into the sea. Sun-driven colour (warm sunlit / cool shadow) keeps it from reading as flat
+    chalk. used_with_niagara_sprites."""
+    m = _new_material("M_SpraySprite")
+    m.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
+    m.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
+    m.set_editor_property("two_sided", True)
+    m.set_editor_property("used_with_niagara_sprites", True)
+
+    # sun-driven aerated-water colour -> EMISSIVE (unlit): warm where the low sun grazes, cool
+    # blue-grey in shadow (real spray is never RGB(1,1,1)).
+    sun = _lib.create_material_expression(m, unreal.MaterialExpressionSkyAtmosphereLightDirection, -1150, -300)
+    up = _const3(m, 0.0, 0.0, 1.0, -1150, -180)
+    ndl = _lib.create_material_expression(m, unreal.MaterialExpressionDotProduct, -1000, -260)
+    _lib.connect_material_expressions(sun, "", ndl, "A")
+    _lib.connect_material_expressions(up, "", ndl, "B")
+    nsat = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, -870, -260)
+    _lib.connect_material_expressions(ndl, "", nsat, "")
+    sunbias = _lib.create_material_expression(m, unreal.MaterialExpressionPower, -740, -260)
+    sunbias.set_editor_property("const_exponent", 0.5)
+    _lib.connect_material_expressions(nsat, "", sunbias, "Base")
+    cool = _const3(m, 0.62, 0.70, 0.80, -740, -420)
+    warm = _const3(m, 0.95, 0.96, 0.98, -740, -120)
+    col = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, -560, -260)
+    _lib.connect_material_expressions(cool, "", col, "A")
+    _lib.connect_material_expressions(warm, "", col, "B")
+    _lib.connect_material_expressions(sunbias, "", col, "Alpha")
+    _lib.connect_material_property(col, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+
+    uv = _lib.create_material_expression(m, unreal.MaterialExpressionTextureCoordinate, -1100, 200)
+    feather = _lib.create_material_expression(m, unreal.MaterialExpressionCustom, -740, 200)
+    feather.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT1)
+    in_uv = unreal.CustomInput(); in_uv.set_editor_property("input_name", "UV")
+    feather.set_editor_property("inputs", [in_uv])
+    feather.set_editor_property("code", "float d=length(UV-0.5); float f=saturate(1.0-2.0*d); return f*f;")
+    _lib.connect_material_expressions(uv, "", feather, "UV")
+
+    # soft-particle depth fade — dissolve into the sea instead of slicing a hard rectangle
+    sdep = _lib.create_material_expression(m, unreal.MaterialExpressionSceneDepth, -900, 700)
+    pdep = _lib.create_material_expression(m, unreal.MaterialExpressionPixelDepth, -900, 800)
+    ddiff = _lib.create_material_expression(m, unreal.MaterialExpressionSubtract, -740, 740)
+    _lib.connect_material_expressions(sdep, "", ddiff, "A")
+    _lib.connect_material_expressions(pdep, "", ddiff, "B")
+    dscale = _lib.create_material_expression(m, unreal.MaterialExpressionDivide, -600, 740)
+    _lib.connect_material_expressions(ddiff, "", dscale, "A")
+    _lib.connect_material_expressions(_const(m, 80.0, -740, 860), "", dscale, "B")
+    softfade = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, -460, 740)
+    _lib.connect_material_expressions(dscale, "", softfade, "")
+
+    o = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, 360, 520)
+    _lib.connect_material_expressions(feather, "", o, "A")
+    _lib.connect_material_expressions(softfade, "", o, "B")
+    osat = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, 520, 520)
+    _lib.connect_material_expressions(o, "", osat, "")
+    _lib.connect_material_property(osat, "", unreal.MaterialProperty.MP_OPACITY)
+
+    _lib.recompile_material(m)
+    unreal.EditorAssetLibrary.save_loaded_asset(m)
+    return m
+
+
+def make_wake_ribbon():
+    """Niagara RIBBON-wake foam (NS_Wake): sun-driven whitewater colour (warm where the low sun
+    grazes, cool blue-grey in shadow — real foam is never RGB(1,1,1)), across-width edge falloff
+    (ribbon U), tail fade along length (ribbon V), world-space turbulence breakup. UNLIT emissive
+    (bright foam). used_with_niagara_ribbons."""
+    m = _new_material("M_WakeRibbon")
+    m.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
+    m.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
+    m.set_editor_property("two_sided", True)
+    m.set_editor_property("used_with_niagara_ribbons", True)
+
+    # sun-driven foam colour (same approach as make_wake)
+    sun = _lib.create_material_expression(m, unreal.MaterialExpressionSkyAtmosphereLightDirection, -1150, -300)
+    up = _const3(m, 0.0, 0.0, 1.0, -1150, -180)
+    ndl = _lib.create_material_expression(m, unreal.MaterialExpressionDotProduct, -1000, -260)
+    _lib.connect_material_expressions(sun, "", ndl, "A")
+    _lib.connect_material_expressions(up, "", ndl, "B")
+    nsat = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, -870, -260)
+    _lib.connect_material_expressions(ndl, "", nsat, "")
+    sunbias = _lib.create_material_expression(m, unreal.MaterialExpressionPower, -740, -260)
+    sunbias.set_editor_property("const_exponent", 0.5)
+    _lib.connect_material_expressions(nsat, "", sunbias, "Base")
+    coolfoam = _const3(m, 0.60, 0.70, 0.80, -740, -420)
+    warmfoam = _const3(m, 0.97, 0.96, 0.92, -740, -120)
+    foam = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, -560, -260)
+    _lib.connect_material_expressions(coolfoam, "", foam, "A")
+    _lib.connect_material_expressions(warmfoam, "", foam, "B")
+    _lib.connect_material_expressions(sunbias, "", foam, "Alpha")
+    _lib.connect_material_property(foam, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+
+    # ribbon UV: U across width, V along length. edge = 1-(|U-0.5|*2)^1.6 ; tail = (1-V)^1.3
+    uv = _lib.create_material_expression(m, unreal.MaterialExpressionTextureCoordinate, -1000, 320)
+    shape = _lib.create_material_expression(m, unreal.MaterialExpressionCustom, -640, 320)
+    shape.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT1)
+    in_uv2 = unreal.CustomInput(); in_uv2.set_editor_property("input_name", "UV")
+    shape.set_editor_property("inputs", [in_uv2])
+    shape.set_editor_property("code",
+        "float e=saturate(1.0-pow(abs(UV.x-0.5)*2.0,1.6)); float t=pow(saturate(1.0-UV.y),1.3); return e*t;")
+    _lib.connect_material_expressions(uv, "", shape, "UV")
+
+    # world-space turbulence breakup (ragged whitewater, not a solid band), floored so it churns
+    n_coarse = _panned_noise(m, 0.006, (0.0, 0.0, 0.0), 0.05, 1.0, ax=-640, ay=640)
+    n_fine = _panned_noise(m, 0.022, (1.2, 0.7, 0.0), 0.0, 1.3, ax=-640, ay=900)
+    ncomb = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -480, 700)
+    _lib.connect_material_expressions(n_coarse, "", ncomb, "A")
+    _lib.connect_material_expressions(n_fine, "", ncomb, "B")
+    noise = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, -340, 700)
+    _lib.connect_material_expressions(_const(m, 0.45, -480, 820), "", noise, "A")
+    _lib.connect_material_expressions(_const(m, 1.0, -480, 900), "", noise, "B")
+    _lib.connect_material_expressions(ncomb, "", noise, "Alpha")
+
+    base_op = _const(m, 1.4, -340, 480)
+    o1 = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -120, 420)
+    _lib.connect_material_expressions(base_op, "", o1, "A")
+    _lib.connect_material_expressions(shape, "", o1, "B")
+    o2 = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, 60, 480)
+    _lib.connect_material_expressions(o1, "", o2, "A")
+    _lib.connect_material_expressions(noise, "", o2, "B")
+    osat = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, 220, 480)
+    _lib.connect_material_expressions(o2, "", osat, "")
+    _lib.connect_material_property(osat, "", unreal.MaterialProperty.MP_OPACITY)
+
+    _lib.recompile_material(m)
+    unreal.EditorAssetLibrary.save_loaded_asset(m)
+    return m
+
+
 def make_spray():
     """White water-spray puff for the hull waterline ISM particles — small
     aerated droplets thrown off the hull where waves slap it. Camera-facing
@@ -1407,75 +1539,89 @@ def make_spray():
     m.set_editor_property("used_with_instanced_static_meshes", True)
 
     # Per-instance Age 0..1 from custom-data slot 0 (same as make_rocket_smoke).
-    age = _instance_age(m, -1000, 400)
+    age = _instance_age(m, -1100, 600)
 
     # AERATED-WATER base colour (lit, NOT emissive): slightly cool/off-white so the volumetric
     # lighting paints it blue-grey in shadow and warm in sun. Real spray is never RGB(1,1,1).
-    base = _const3(m, 0.78, 0.84, 0.92, -700, -120)
+    base = _const3(m, 0.80, 0.86, 0.92, -700, -120)
     _lib.connect_material_property(base, "", unreal.MaterialProperty.MP_BASE_COLOR)
 
-    # RADIAL UV feather: a camera-facing billboard is flat-on, so Fresnel (≈0 when facing) can't
-    # soften it. Fade by distance from the UV centre instead, so the plane reads as a soft round
-    # droplet (opaque centre -> transparent edge). Squared for a rounder core + gentler edge.
-    uv = _lib.create_material_expression(m, unreal.MaterialExpressionTextureCoordinate, -900, 200)
-    feather = _lib.create_material_expression(m, unreal.MaterialExpressionCustom, -700, 200)
-    feather.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT1)
-    in_uv = unreal.CustomInput(); in_uv.set_editor_property("input_name", "UV")
-    feather.set_editor_property("inputs", [in_uv])
-    feather.set_editor_property("code", "float f = saturate(1.0 - 1.85 * length(UV - 0.5)); return f * f;")
-    _lib.connect_material_expressions(uv, "", feather, "UV")
+    uv = _lib.create_material_expression(m, unreal.MaterialExpressionTextureCoordinate, -1100, 200)
+    sheet = unreal.load_asset("/Game/SeaShield/Textures/T_SpraySheet")
+    if sheet is not None:
+        # PROCEDURAL FLIPBOOK (gen_spray_flipbook.py): per-instance age advances the SubUV frame so each
+        # puff plays a droplet-cluster forming -> spreading -> dissipating animation (real shape variety
+        # vs a single round billboard). frame=floor(age*(F-1)); cell=(frame%G, floor(frame/G)); the quad
+        # UV maps into that cell: uv=(TexCoord + cell)/G. The sheet alpha already fades over its life.
+        G, F = 8.0, 64.0
+        fmul = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -940, 600)
+        _lib.connect_material_expressions(age, "", fmul, "A")
+        _lib.connect_material_expressions(_const(m, F - 1.0, -1100, 720), "", fmul, "B")
+        frame = _lib.create_material_expression(m, unreal.MaterialExpressionFloor, -800, 600)
+        _lib.connect_material_expressions(fmul, "", frame, "")
+        col = _lib.create_material_expression(m, unreal.MaterialExpressionFmod, -660, 540)
+        _lib.connect_material_expressions(frame, "", col, "A")
+        _lib.connect_material_expressions(_const(m, G, -800, 470), "", col, "B")
+        rdiv = _lib.create_material_expression(m, unreal.MaterialExpressionDivide, -660, 700)
+        _lib.connect_material_expressions(frame, "", rdiv, "A")
+        _lib.connect_material_expressions(_const(m, G, -800, 760), "", rdiv, "B")
+        rowf = _lib.create_material_expression(m, unreal.MaterialExpressionFloor, -520, 700)
+        _lib.connect_material_expressions(rdiv, "", rowf, "")
+        cell = _lib.create_material_expression(m, unreal.MaterialExpressionAppendVector, -380, 620)
+        _lib.connect_material_expressions(col, "", cell, "A")
+        _lib.connect_material_expressions(rowf, "", cell, "B")
+        uvp = _lib.create_material_expression(m, unreal.MaterialExpressionAdd, -240, 400)
+        _lib.connect_material_expressions(uv, "", uvp, "A")
+        _lib.connect_material_expressions(cell, "", uvp, "B")
+        cuv = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -100, 400)
+        _lib.connect_material_expressions(uvp, "", cuv, "A")
+        _lib.connect_material_expressions(_const(m, 1.0 / G, -240, 520), "", cuv, "B")
+        tex = _lib.create_material_expression(m, unreal.MaterialExpressionTextureSample, 60, 400)
+        tex.set_editor_property("texture", sheet)
+        _lib.connect_material_expressions(cuv, "", tex, "UVs")
+        shape_node, shape_out = tex, "A"   # flipbook alpha = droplet shape (with its own life fade baked in)
+    else:
+        # Fallback (no texture): radial feather * (1-age) + noise erosion — a single wispy droplet.
+        feather = _lib.create_material_expression(m, unreal.MaterialExpressionCustom, -700, 200)
+        feather.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT1)
+        in_uv = unreal.CustomInput(); in_uv.set_editor_property("input_name", "UV")
+        feather.set_editor_property("inputs", [in_uv])
+        feather.set_editor_property("code", "float f = saturate(1.0 - 1.85 * length(UV - 0.5)); return f*f;")
+        _lib.connect_material_expressions(uv, "", feather, "UV")
+        ageinv = _lib.create_material_expression(m, unreal.MaterialExpressionOneMinus, -700, 360)
+        _lib.connect_material_expressions(age, "", ageinv, "")
+        fa = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -540, 280)
+        _lib.connect_material_expressions(feather, "", fa, "A")
+        _lib.connect_material_expressions(ageinv, "", fa, "B")
+        shape_node, shape_out = fa, ""
 
     # Faint WARM emissive rim where a translucent droplet catches the sun — the backlit halo the
-    # volumetric term alone reads too dim for. Driven by the feather EDGE (1-feather) and kept LOW so
-    # the core stays lighting-driven and doesn't bloom into bright squares.
-    rimedge = _lib.create_material_expression(m, unreal.MaterialExpressionOneMinus, -520, 40)
-    _lib.connect_material_expressions(feather, "", rimedge, "")
-    rimcol = _const3(m, 0.34, 0.31, 0.26, -520, -90)   # warm, low — sun-through-mist glow, not a bloom blob
-    rim = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -380, -10)
+    # volumetric term alone reads too dim for. Driven by the droplet shape, kept LOW (no bloom blob).
+    rimcol = _const3(m, 0.30, 0.27, 0.22, 200, 640)
+    rim = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, 340, 560)
     _lib.connect_material_expressions(rimcol, "", rim, "A")
-    _lib.connect_material_expressions(rimedge, "", rim, "B")
+    _lib.connect_material_expressions(shape_node, shape_out, rim, "B")
     _lib.connect_material_property(rim, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
 
-    # Age fade: (1 - Age) so the puff starts opaque and fully dissolves.
-    ageinv = _lib.create_material_expression(m, unreal.MaterialExpressionOneMinus, -700, 400)
-    _lib.connect_material_expressions(age, "", ageinv, "")
-
-    # NOISE EROSION -> wispy, aerated, turbulent droplet edges instead of a smooth ball (the
-    # M_RocketTrail wispy-edge trick). Floored to [0.5,1.0] so it ROUGHENS the puff without
-    # fragmenting the small billboard to holes.
-    en = _panned_noise(m, 0.09, (3.0, 2.0, 4.0), 0.0, 1.7, ax=-560, ay=900)
-    erode = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, -300, 880)
-    _lib.connect_material_expressions(_const(m, 0.12, -440, 980), "", erode, "A")   # deep wispy holes (was 0.5) -> torn aerated edges, not a round cotton-ball
-    _lib.connect_material_expressions(_const(m, 1.0, -440, 1060), "", erode, "B")
-    _lib.connect_material_expressions(en, "", erode, "Alpha")
-
-    # SOFT-PARTICLE depth fade — the real fix for the "white SQUARES". A camera-facing billboard that
-    # pokes through the opaque water/hull is hard-clipped along a straight line, leaving a rectangular
-    # cut. Fade opacity where the billboard pixel nears the surface behind it (SceneDepth-PixelDepth
-    # small) so the puff dissolves into the sea instead of slicing it. Translucent reads SceneDepth.
-    sdep = _lib.create_material_expression(m, unreal.MaterialExpressionSceneDepth, -900, 560)
-    pdep = _lib.create_material_expression(m, unreal.MaterialExpressionPixelDepth, -900, 680)
-    ddiff = _lib.create_material_expression(m, unreal.MaterialExpressionSubtract, -740, 600)
+    # SOFT-PARTICLE depth fade — dissolve the billboard into the sea instead of slicing a hard rectangle
+    # where it pokes through the surface (SceneDepth - PixelDepth small -> fade). Translucent reads SceneDepth.
+    sdep = _lib.create_material_expression(m, unreal.MaterialExpressionSceneDepth, -900, 980)
+    pdep = _lib.create_material_expression(m, unreal.MaterialExpressionPixelDepth, -900, 1080)
+    ddiff = _lib.create_material_expression(m, unreal.MaterialExpressionSubtract, -740, 1020)
     _lib.connect_material_expressions(sdep, "", ddiff, "A")
     _lib.connect_material_expressions(pdep, "", ddiff, "B")
-    dscale = _lib.create_material_expression(m, unreal.MaterialExpressionDivide, -600, 600)
+    dscale = _lib.create_material_expression(m, unreal.MaterialExpressionDivide, -600, 1020)
     _lib.connect_material_expressions(ddiff, "", dscale, "A")
-    _lib.connect_material_expressions(_const(m, 60.0, -740, 700), "", dscale, "B")   # ~60 cm soft band
-    softfade = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, -460, 600)
+    _lib.connect_material_expressions(_const(m, 60.0, -740, 1120), "", dscale, "B")   # ~60 cm soft band
+    softfade = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, -460, 1020)
     _lib.connect_material_expressions(dscale, "", softfade, "")
 
-    # opacity = feather * (1-Age) * soft-particle fade * erosion, then saturate.
-    o1 = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -360, 280)
-    _lib.connect_material_expressions(feather, "", o1, "A")
-    _lib.connect_material_expressions(ageinv, "", o1, "B")
-    o2 = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -260, 380)
-    _lib.connect_material_expressions(o1, "", o2, "A")
-    _lib.connect_material_expressions(softfade, "", o2, "B")
-    o3 = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -180, 460)
-    _lib.connect_material_expressions(o2, "", o3, "A")
-    _lib.connect_material_expressions(erode, "", o3, "B")
-    osat = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, -120, 320)
-    _lib.connect_material_expressions(o3, "", osat, "")
+    # opacity = droplet shape * soft-particle fade, then saturate.
+    o = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, 340, 400)
+    _lib.connect_material_expressions(shape_node, shape_out, o, "A")
+    _lib.connect_material_expressions(softfade, "", o, "B")
+    osat = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, 480, 400)
+    _lib.connect_material_expressions(o, "", osat, "")
     _lib.connect_material_property(osat, "", unreal.MaterialProperty.MP_OPACITY)
 
     _lib.recompile_material(m)
@@ -1958,11 +2104,18 @@ def _foam_streaks(m, ax, ay):
     return cust
 
 
-def make_ocean():
+def make_ocean(name="M_Ocean", lite=False):
     """The from-scratch realistic ocean material (see section header). Substrate Default-Lit,
     BLEND_TRANSLUCENT, surface-forward — emissive works (unlike SLW), refraction is real, and we
-    own the reflective look so grazing is never the SLW black mirror."""
-    m = _new_material("M_Ocean")
+    own the reflective look so grazing is never the SLW black mirror.
+
+    lite=True builds the GAMEPLAY twin (e.g. 'M_OceanGame'): identical Gerstner WPO + normal/foam
+    (so buoyancy/wake sync + the wave look are unchanged) but with REFRACTION REMOVED — on open
+    deep ocean refraction shows almost nothing yet costs a full-screen Distortion pass (~11% of the
+    frame, ProfileGPU-attributed), so dropping it is the single biggest gameplay-fps win at no
+    visible cost. The full M_Ocean (lite=False) keeps refraction for the fps-unconstrained capture
+    tier (L_RangeCustom)."""
+    m = _new_material(name)
     m.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_DEFAULT_LIT)
     m.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
     # Surface-forward translucency lighting — LOAD-BEARING: it's why emissive/Fresnel work and grazing
@@ -1987,10 +2140,11 @@ def make_ocean():
         m.set_editor_property("translucency_lighting_mode", _tlm)
     else:
         unreal.log_warning("SeaShieldMaterials: TLM enum missing (both 5.7/5.8 names absent)")
-    try:
-        m.set_editor_property("refraction_method", unreal.RefractionMode.RM_PIXEL_NORMAL_OFFSET)
-    except Exception:  # noqa: BLE001
-        pass
+    if not lite:
+        try:
+            m.set_editor_property("refraction_method", unreal.RefractionMode.RM_PIXEL_NORMAL_OFFSET)
+        except Exception:  # noqa: BLE001
+            pass
 
     # displacement (WPO) + analytic normal/foam
     disp = _ocean_custom(m, _OCEAN_DISP_HLSL, unreal.CustomMaterialOutputType.CMOT_FLOAT3, -1900, -260)
@@ -2360,7 +2514,8 @@ def make_ocean():
     else:
         _lib.connect_material_property(spec, "", unreal.MaterialProperty.MP_SPECULAR)
     _lib.connect_material_property(_const(m, 0.0, -300, 820), "", unreal.MaterialProperty.MP_METALLIC)
-    _lib.connect_material_property(_const(m, 1.05, -300, 880), "", unreal.MaterialProperty.MP_REFRACTION)
+    if not lite:  # lite (gameplay) leaves MP_REFRACTION UNCONNECTED -> no Distortion pass (~11% frame saved)
+        _lib.connect_material_property(_const(m, 1.05, -300, 880), "", unreal.MaterialProperty.MP_REFRACTION)
 
     # emissive: Fresnel sky-reflection floor (never black) + sun glitter + foam glow
     # SKY = horizon->zenith GRADIENT (real photos: grazing sea brightens to a lighter cyan ~sky@20-30deg,
@@ -2526,6 +2681,8 @@ def main():
     make_muzzle()
     make_debris()
     make_wake()
+    make_spray_sprite()   # NS_Spray (Niagara) — lit-volumetric sprite
+    make_wake_ribbon()    # NS_Wake (Niagara) — sun-driven foam ribbon
     make_rain()
     make_far_ocean()
     make_sea_ocean()

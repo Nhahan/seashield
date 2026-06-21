@@ -245,16 +245,57 @@ void ASeaShieldGameModeBase::BeginPlay()
 	{
 		if (!FParse::Param(FCommandLine::Get(), TEXT("SeaShotFromPawn")))
 		{
-			// SeaShotX/Y/Z are stage-frame overrides; the default quarter view
-			// frames the ownship at SeaWorldFrame::Origin.
-			FVector CameraLocation = SeaWorldFrame::Origin + FVector(-15000.0, -9000.0, 4000.0);
-			FParse::Value(FCommandLine::Get(), TEXT("SeaShotX="), CameraLocation.X);
-			FParse::Value(FCommandLine::Get(), TEXT("SeaShotY="), CameraLocation.Y);
-			FParse::Value(FCommandLine::Get(), TEXT("SeaShotZ="), CameraLocation.Z);
+			// -SeaShotTrack: instead of a STATIC quarter view (which loses a steaming ship,
+			// since the focal distance + framing both assume the hull sits at the stage
+			// origin), truck the camera with the live ownship every frame. Then -SeaShotX/Y/Z
+			// are a SHIP-RELATIVE offset and the camera look-at + focal track the moving hull.
+			const bool bTrack = FParse::Param(FCommandLine::Get(), TEXT("SeaShotTrack"));
+			UWorld* const World = GetWorld();
+			// The live ownship world location (tracking) — falls back to the stage origin
+			// until the frigate is located (BeginPlay) or if the stage has none.
+			auto OwnshipLoc = [World]() -> FVector
+			{
+				// No early break: the singleton means one iteration, but a break here would
+				// leave ++It unreachable (UE5.8 -Werror,-Wunreachable-code-loop-increment).
+				for (TActorIterator<ASeaWorldManager> It(World); It; ++It)
+				{
+					if (AActor* Ship = It->GetOwnshipActor())
+					{
+						return Ship->GetActorLocation();
+					}
+				}
+				return SeaWorldFrame::Origin;
+			};
+			constexpr double kAimUpCm = 250.0;  // aim at the hull centre, a hair above the waterline.
+
+			// In track mode -SeaShotX/Y/Z are the ship-relative offset; otherwise they are
+			// the existing absolute stage-frame overrides of the default quarter view.
+			FVector CamOffset(-15000.0, -9000.0, 4000.0);
+			FVector CameraLocation = SeaWorldFrame::Origin + CamOffset;
+			if (bTrack)
+			{
+				FParse::Value(FCommandLine::Get(), TEXT("SeaShotX="), CamOffset.X);
+				FParse::Value(FCommandLine::Get(), TEXT("SeaShotY="), CamOffset.Y);
+				FParse::Value(FCommandLine::Get(), TEXT("SeaShotZ="), CamOffset.Z);
+				CameraLocation = OwnshipLoc() + CamOffset;
+			}
+			else
+			{
+				FParse::Value(FCommandLine::Get(), TEXT("SeaShotX="), CameraLocation.X);
+				FParse::Value(FCommandLine::Get(), TEXT("SeaShotY="), CameraLocation.Y);
+				FParse::Value(FCommandLine::Get(), TEXT("SeaShotZ="), CameraLocation.Z);
+			}
 			FRotator CameraRotation(-13.0, 31.0, 0.0);
-			FParse::Value(FCommandLine::Get(), TEXT("SeaShotPitch="), CameraRotation.Pitch);
-			FParse::Value(FCommandLine::Get(), TEXT("SeaShotYaw="), CameraRotation.Yaw);
-			ACameraActor* Camera = GetWorld()->SpawnActor<ACameraActor>(CameraLocation, CameraRotation);
+			if (bTrack)
+			{
+				CameraRotation = (OwnshipLoc() + FVector(0.0, 0.0, kAimUpCm) - CameraLocation).Rotation();
+			}
+			else
+			{
+				FParse::Value(FCommandLine::Get(), TEXT("SeaShotPitch="), CameraRotation.Pitch);
+				FParse::Value(FCommandLine::Get(), TEXT("SeaShotYaw="), CameraRotation.Yaw);
+			}
+			ACameraActor* Camera = World->SpawnActor<ACameraActor>(CameraLocation, CameraRotation);
 			if (Camera != nullptr)
 			{
 				// Cinematic depth of field — the deferred real-time path uses DiaphragmDOF (the
@@ -281,8 +322,11 @@ void ASeaShieldGameModeBase::BeginPlay()
 					}
 					FPostProcessSettings& PP = Cam->PostProcessSettings;
 					PP.bOverride_DepthOfFieldFocalDistance = true;
+					// Focus the lens on the subject: the live ownship when tracking, else the
+					// stage origin. The tracking timer below refreshes this every frame.
+					const FVector FocusTarget = bTrack ? OwnshipLoc() : SeaWorldFrame::Origin;
 					PP.DepthOfFieldFocalDistance =
-					    static_cast<float>((SeaWorldFrame::Origin - CameraLocation).Size());
+					    static_cast<float>((FocusTarget - CameraLocation).Size());
 					PP.bOverride_DepthOfFieldFstop = true;
 					PP.DepthOfFieldFstop = 2.0f;  // open aperture -> clearly-read cinematic separation
 					PP.bOverride_DepthOfFieldSensorWidth = true;
@@ -293,6 +337,33 @@ void ASeaShieldGameModeBase::BeginPlay()
 				if (APlayerController* Controller = GetWorld()->GetFirstPlayerController())
 				{
 					Controller->SetViewTarget(Camera);
+				}
+				// Tracking: a fast repeating timer trucks the camera with the live hull each
+				// frame — position (ship + offset), look-at, and focal all follow the steaming
+				// ship so it stays framed + tack-sharp through the shot. (No-op when !bTrack.)
+				if (bTrack)
+				{
+					FTimerHandle TrackTimer;
+					World->GetTimerManager().SetTimer(
+						TrackTimer,
+						[Camera, OwnshipLoc, CamOffset]()
+						{
+							if (!IsValid(Camera))
+							{
+								return;
+							}
+							const FVector ShipLoc = OwnshipLoc();
+							const FVector CamLoc = ShipLoc + CamOffset;
+							Camera->SetActorLocation(CamLoc);
+							Camera->SetActorRotation(
+							    (ShipLoc + FVector(0.0, 0.0, 250.0) - CamLoc).Rotation());
+							if (UCameraComponent* C = Camera->GetCameraComponent())
+							{
+								C->PostProcessSettings.DepthOfFieldFocalDistance =
+								    static_cast<float>((ShipLoc - CamLoc).Size());
+							}
+						},
+						1.0f / 120.0f, /*bLoop=*/true, /*FirstDelay=*/0.0f);
 				}
 			}
 		}
