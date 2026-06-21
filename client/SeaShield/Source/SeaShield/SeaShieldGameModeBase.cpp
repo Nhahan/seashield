@@ -257,19 +257,38 @@ void ASeaShieldGameModeBase::BeginPlay()
 			ACameraActor* Camera = GetWorld()->SpawnActor<ACameraActor>(CameraLocation, CameraRotation);
 			if (Camera != nullptr)
 			{
-				// Cinematic depth of field. UE5.8 auto-selects CircleDOF/DiaphragmDOF for the
-				// deferred path (Accumulation DoF is Movie-Render-Graph-only, not the real-time
-				// -SeaShot path). Focus on the ownship at the stage origin; the focal distance is
-				// the camera->ship range so the hull stays sharp while the near sea and far horizon
-				// fall gently out of focus.
+				// Cinematic depth of field — the deferred real-time path uses DiaphragmDOF (the
+				// physically-based bokeh DoF; Accumulation DoF is Movie-Render-Graph-only, and MRG
+				// would desync this server-synced VFX/entity stream — so DiaphragmDOF tuned to the
+				// engine's max quality, r.DOF.Recombine.Quality=2 / kernel 0.025 in cinematic.cvars,
+				// IS the highest feasible quality here). Focus on the ownship at the stage origin: the
+				// focal distance is the camera->ship range (uses the -SeaShotX/Y/Z overrides) so the
+				// hull stays tack-sharp while the near sea and far horizon fall cinematically out of
+				// focus. A full-frame sensor + low f-stop opens the aperture for a clearly-read (but
+				// not toy-tilt-shift) separation; 8 diaphragm blades round the bokeh.
 				if (UCameraComponent* Cam = Camera->GetCameraComponent())
 				{
+					// Optional telephoto lens (-SeaShotFOV=<deg>). At the default ~90° wide FOV the
+					// hyperfocal distance is only ~5 m, so any subject past ~10 m is fully in focus
+					// regardless of f-stop — correct optics (wide establishing shots are deep-focus,
+					// which keeps the ocean/mist/sky sharp). A narrow FOV (long lens) raises the
+					// hyperfocal past the subject so the background finally falls into bokeh; it also
+					// compresses the scene for a more cinematic naval frame.
+					float ShotFov = 0.0f;
+					if (FParse::Value(FCommandLine::Get(), TEXT("SeaShotFOV="), ShotFov) && ShotFov > 5.0f)
+					{
+						Cam->SetFieldOfView(ShotFov);
+					}
 					FPostProcessSettings& PP = Cam->PostProcessSettings;
 					PP.bOverride_DepthOfFieldFocalDistance = true;
 					PP.DepthOfFieldFocalDistance =
 					    static_cast<float>((SeaWorldFrame::Origin - CameraLocation).Size());
 					PP.bOverride_DepthOfFieldFstop = true;
-					PP.DepthOfFieldFstop = 4.0f;  // subtle cinematic separation, not a toy-tilt-shift
+					PP.DepthOfFieldFstop = 2.0f;  // open aperture -> clearly-read cinematic separation
+					PP.bOverride_DepthOfFieldSensorWidth = true;
+					PP.DepthOfFieldSensorWidth = 36.0f;  // full-frame -> shallower, filmic depth
+					PP.bOverride_DepthOfFieldBladeCount = true;
+					PP.DepthOfFieldBladeCount = 8;  // rounder bokeh than the 5-blade default
 				}
 				if (APlayerController* Controller = GetWorld()->GetFirstPlayerController())
 				{

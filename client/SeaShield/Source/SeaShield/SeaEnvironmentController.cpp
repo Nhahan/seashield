@@ -1,9 +1,7 @@
 #include "SeaEnvironmentController.h"
 
 #include "Components/ExponentialHeightFogComponent.h"
-#include "Components/LocalFogVolumeComponent.h"
 #include "Engine/ExponentialHeightFog.h"
-#include "Engine/LocalFogVolume.h"
 #include "EngineUtils.h"
 #include "Kismet/GameplayStatics.h"
 #include "Kismet/KismetMaterialLibrary.h"
@@ -46,7 +44,6 @@ void ASeaEnvironmentController::Tick(float DeltaTime)
 
 		ApplySeaState(CachedWeather);
 		ApplyFog(CachedWeather);
-		ApplySeaMist(CachedWeather);
 
 		if (WeatherParameters != nullptr)
 		{
@@ -151,51 +148,6 @@ void ASeaEnvironmentController::ApplyFog(const FSeaWeather& Weather) const
 	       TEXT("Fog applied: density %.3f start %.0f vol_ext %.2f (humidity %.2f, rain %.2f, calm %.2f)"),
 	       Density, FMath::Lerp(72000.0f, 6000.0f, SeaFog), FMath::Lerp(0.5f, 2.2f, SeaFog),
 	       Weather.Humidity, Weather.RainIntensity, Calm);
-}
-
-void ASeaEnvironmentController::ApplySeaMist(const FSeaWeather& Weather)
-{
-	// Sea mist / fog banks form in CALM, HUMID air over water (advection/radiation fog)
-	// and are torn apart by wind. A low Local Fog Volume (UE5.8) hugging the sea; its
-	// density is seed-random (humidity × calm), so each engagement draws a different
-	// morning. FogPhaseG forward-scatters the sun -> the mist glows toward the light.
-	const float WindMps = Weather.WindCms.Size() / 100.0f;
-	const float Calm = 1.0f - FMath::Clamp(WindMps / 6.0f, 0.0f, 1.0f);              // >6 m/s tears it away
-	const float Humid = FMath::Clamp((Weather.Humidity - 0.5f) * 2.5f, 0.0f, 1.0f);  // needs >0.5 RH
-	const float Mist = Humid * Calm;  // 0 = clear, 1 = thick sea fog
-
-	if (SeaMist == nullptr)
-	{
-		// Centre the low dome on the ocean surface (works for both the gameplay L_Range
-		// and the cinematic L_RangeCustom, which share the water body's stage position).
-		FVector Centre(0.0f, 0.0f, 0.0f);
-		TActorIterator<AWaterBody> WaterIt(GetWorld());
-		if (WaterIt)
-		{
-			Centre = WaterIt->GetActorLocation();
-		}
-		SeaMist = GetWorld()->SpawnActor<ALocalFogVolume>(Centre, FRotator::ZeroRotator);
-	}
-	if (SeaMist == nullptr)
-	{
-		return;
-	}
-	ULocalFogVolumeComponent* Vol = SeaMist->GetComponent();
-	if (Vol == nullptr)
-	{
-		return;
-	}
-	// Scale the COMPONENT (the AInfo root may not carry the actor scale into the fog) -> a wide, low mist
-	// SHEET over the sea (~4 km across, ~150 m tall), not a 5 m ball at the origin.
-	Vol->SetWorldScale3D(FVector(800.0f, 800.0f, 30.0f));
-	Vol->SetVisibility(Mist > 0.01f, true);
-	Vol->SetRadialFogExtinction(Mist * 1.2f);   // extinction >1 reads clearly
-	Vol->SetHeightFogExtinction(Mist * 2.0f);   // height-distributed -> hugs the surface
-	Vol->SetHeightFogFalloff(120.0f);           // a thick, visible mist layer (lower = larger transition)
-	Vol->SetFogPhaseG(0.6f);                    // forward scatter -> bright toward the sun
-	UE_LOG(LogSeaEnvironment, Display,
-	       TEXT("Sea mist applied: mist %.2f (humidity %.2f, wind %.1f m/s, calm %.2f)"),
-	       Mist, Weather.Humidity, WindMps, Calm);
 }
 
 void ASeaEnvironmentController::UpdateRain(float DeltaTime)

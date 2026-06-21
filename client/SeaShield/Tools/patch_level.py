@@ -64,12 +64,27 @@ def _apply_light_shafts(light_comp):
 
 
 def _apply_height_fog(fogc):
-    """Mirror of setup_level._apply_height_fog — thin sky-driven aerial-perspective
-    haze (UE5.7 luminance model: SkyAtmosphere ambient drives the fog colour)."""
-    fogc.set_editor_property("fog_density", 0.028)        # P3-7d: a touch more horizon haze — soften the hard sea-sky seam
-    fogc.set_editor_property("fog_height_falloff", 0.12)
-    fogc.set_editor_property("start_distance", 72000.0)   # P3-7d: haze builds sooner on the far water (depth/aerial perspective)
-    fogc.set_editor_property("fog_max_opacity", 0.85)
+    """Mirror of setup_level._apply_height_fog — sky-driven aerial-perspective haze
+    (SkyAtmosphere ambient drives the fog colour) PLUS UE5.8 volumetric god-ray sea mist.
+    Kept in sync with setup_level: density/start runtime-overridden per seed weather by
+    ASeaEnvironmentController; the CEILING/shape (no runtime setter) is set here."""
+    fogc.set_editor_property("fog_density", 0.028)        # initial; runtime-overridden per weather
+    fogc.set_editor_property("fog_height_falloff", 0.30)  # low-lying sea fog (synced to setup_level; was 0.12)
+    fogc.set_editor_property("start_distance", 72000.0)   # initial; runtime-overridden per weather
+    fogc.set_editor_property("fog_max_opacity", 0.92)     # uncap, synced to setup_level (was 0.85) -> weather murk
+    # UE5.8 VOLUMETRIC FOG — gameplay tier (mirror of setup_level): seed weather mist scatters the low sun
+    # in 3D god-rays + renders over the translucent ocean. enable has no runtime setter -> static; the
+    # amount follows runtime weather density. Froxel grid is pinned + perf-gated (40fps floor) via
+    # r.VolumetricFog.GridPixelSize/GridSizeZ in DefaultEngine.ini [SystemSettings]. FSSS stays
+    # cinematic-only (apply_ocean) on this tier.
+    for _vp, _vv in (("enable_volumetric_fog", True),
+                     ("volumetric_fog_distance", 12000.0),
+                     ("volumetric_fog_scattering_distribution", 0.30),
+                     ("volumetric_fog_extinction_scale", 1.2)):
+        try:
+            fogc.set_editor_property(_vp, _vv)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def main():

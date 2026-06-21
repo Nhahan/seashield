@@ -73,6 +73,16 @@ r.MotionBlurQuality=4
 r.AmbientOcclusionLevels=3
 r.MaxAnisotropy=16
 r.SSS.Quality=1
+# DiaphragmDOF (the deferred physically-based bokeh DoF the -SeaShot camera drives via its
+# f-stop/sensor/blades) at the engine Cinematic-bucket quality: highest recombine + full
+# kernel radius so the bokeh is smooth and the in/out-of-focus recombine is artifact-free.
+# This is the HIGHEST FEASIBLE real-time DoF — MRG Accumulation DoF is incompatible with this
+# server-synced live capture (offline frame dumps desync the entity/VFX stream) and the visible
+# delta at this moderate DoF (ship ~179 m, f/2) is ~nil. (r.DepthOfField.Quality is a dpcvar-stage
+# dummy; these r.DOF.* levers are the real ones.)
+r.DOF.Recombine.Quality=2
+r.DOF.Kernel.MaxBackgroundRadius=0.025
+r.DOF.Kernel.MaxForegroundRadius=0.025
 #
 # --- TSR: max history resolution so motion (panning sea, flying rockets) stays
 #     razor-sharp instead of ghosting. ---

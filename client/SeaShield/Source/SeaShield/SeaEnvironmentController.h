@@ -7,7 +7,6 @@
 
 #include "SeaEnvironmentController.generated.h"
 
-class ALocalFogVolume;
 class UMaterialInterface;
 class UMaterialParameterCollection;
 class UProceduralMeshComponent;
@@ -50,9 +49,6 @@ private:
 	// fire-control problem actually loses in weather; humid air hazes even
 	// without rain, both seed-random per engagement).
 	void ApplyFog(const FSeaWeather& Weather) const;
-	// Humidity in CALM air -> a low Local Fog Volume "sea mist" (UE5.8) hugging
-	// the water; wind tears it apart. Seed-random amount, light-scattering.
-	void ApplySeaMist(const FSeaWeather& Weather);
 	void UpdateRain(float DeltaTime);
 
 	UPROPERTY()
@@ -63,11 +59,6 @@ private:
 	// Camera-relative streak positions (cm) — wrapped back into the volume as
 	// they fall out of it, so the volume follows any view target switch.
 	TArray<FVector> Drops;
-
-	// Low Local Fog Volume "sea mist" over the water — spawned on first apply,
-	// density driven by humidity × calm (render-only; no sim/determinism touch).
-	UPROPERTY()
-	TObjectPtr<ALocalFogVolume> SeaMist;
 
 	FSeaWeather CachedWeather;
 	bool bApplied = false;

@@ -269,12 +269,13 @@ def _apply_light_shafts(light_comp):
 
 
 def _apply_height_fog(fogc):
-    """Aerial-perspective haze for distance depth: a thin, NON-volumetric height fog
-    that builds toward the horizon (near water stays clear). UE5.7's luminance fog
-    model leaves FogInscatteringLuminance at black and lets the SkyAtmosphere ambient
-    (SkyAtmosphereAmbientContributionColorScale = white) drive the fog colour/
-    brightness — physically-based, naturally cool-tinted at the horizon, no magic
-    numbers. Cheap (no volumetric fog — that is cinematic-only). Mirrored in patch_level.py."""
+    """Aerial-perspective haze for distance depth: a height fog that builds toward the
+    horizon (near water stays clear) PLUS UE5.8 volumetric fog for the near/mid god-ray
+    sea mist. The luminance fog model leaves FogInscatteringLuminance at black and lets
+    the SkyAtmosphere ambient (SkyAtmosphereAmbientContributionColorScale = white) drive
+    the fog colour/brightness — physically-based, naturally cool-tinted at the horizon, no
+    magic numbers. Volumetric fog adds a froxel cost that is perf-gated to the 40fps floor
+    (the grid is pinned in DefaultEngine.ini [SystemSettings]). Mirrored in patch_level.py."""
     # density + start are OVERRIDDEN at runtime by ASeaEnvironmentController from the seed weather; the
     # CEILING/shape (no runtime setter) is set here: high max_opacity uncaps humid/rain murk; a higher
     # falloff makes the fog low-lying (sea-mist 해무 hugging the water).
@@ -282,12 +283,21 @@ def _apply_height_fog(fogc):
     fogc.set_editor_property("fog_height_falloff", 0.30)  # low-lying sea fog (was 0.12, taller column)
     fogc.set_editor_property("start_distance", 72000.0)   # initial; runtime-overridden per weather
     fogc.set_editor_property("fog_max_opacity", 0.92)     # uncap (was 0.85) -> humid/rain seeds build real murk
-    # NOTE: UE5.8 Fog Screen-Space Scattering (enable_fsss) AND volumetric god-ray fog are CINEMATIC-ONLY
-    # (set in apply_ocean.py on L_RangeCustom) — both add a GPU cost (a screen-space pass / a froxel grid)
-    # that the 1440p60 GAMEPLAY budget (thin headroom) can't safely spare, so the gameplay tier keeps the
-    # cheap analytic height fog. Gameplay weather still varies via the runtime density/start
-    # (ASeaEnvironmentController). Enabling gameplay volumetric fog needs a perf_capture opt-in + an
-    # L_Range rewrite (capture-verified: cinematic volumetric mist is dramatic; gameplay cost unmeasured).
+    # UE5.8 VOLUMETRIC FOG — gameplay tier: the seed weather mist scatters the low sun in 3D god-rays AND
+    # the sea-mist renders over the translucent ocean (froxel integration, not the screen-space LFV pass).
+    # enable_volumetric_fog has NO runtime setter -> static here; the AMOUNT follows the runtime weather
+    # density (ASeaEnvironment-controller drives extinction/phase), so clear seeds stay light. The froxel
+    # GRID cost is constant per frame (density-independent) -> pinned + perf-gated to the 40fps floor via
+    # r.VolumetricFog.GridPixelSize/GridSizeZ in [SystemSettings]. NOTE: FSSS (enable_fsss) stays
+    # CINEMATIC-ONLY (apply_ocean) — volumetric already gives the in-game light scattering.
+    for _vp, _vv in (("enable_volumetric_fog", True),
+                     ("volumetric_fog_distance", 12000.0),               # 120 m near/mid god-ray range
+                     ("volumetric_fog_scattering_distribution", 0.30),   # visible shafts + forward sun glow
+                     ("volumetric_fog_extinction_scale", 1.2)):
+        try:
+            fogc.set_editor_property(_vp, _vv)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _save():

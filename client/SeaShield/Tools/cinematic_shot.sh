@@ -26,12 +26,13 @@ PROJ="$ROOT/client/SeaShield/SeaShield.uproject"
 SHOTDIR="$ROOT/client/SeaShield/Saved/Screenshots/MacEditor"
 
 DUR=45; RESX=2560; RESY=1440; SCN=game.scn; PORT=7779; SP=0; IDLE=0; AAR=0
-MODE=seq; SEQ=3; SHOT=0; CAM=""; MAP=""
+MODE=seq; SEQ=3; SHOT=0; CAM=""; MAP=""; FOV=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --seq) MODE=seq; SEQ=$2; shift 2;;
     --shot) MODE=shot; SHOT=$2; shift 2;;
     --cam) CAM=$2; shift 2;;       # hero framing "X,Y,Z,Pitch,Yaw" (stage coords) for --shot
+    --fov) FOV=$2; shift 2;;       # telephoto lens FOV in degrees (narrow = visible DoF bokeh)
     --map) MAP=$2; shift 2;;       # load a non-default map (e.g. /Game/SeaShield/Maps/L_RangeProbe)
     --dur) DUR=$2; shift 2;;
     --res) RESX=${2%x*}; RESY=${2#*x}; shift 2;;
@@ -79,6 +80,7 @@ else
     [ -n "$cp" ]   && FLAGS+=("-SeaShotPitch=$cp")
     [ -n "$cyaw" ] && FLAGS+=("-SeaShotYaw=$cyaw")
   fi
+  [ -n "$FOV" ] && FLAGS+=("-SeaShotFOV=$FOV")   # telephoto lens -> visible DoF bokeh
 fi
 FLAGS+=("-abslog=$ABSLOG")
 
