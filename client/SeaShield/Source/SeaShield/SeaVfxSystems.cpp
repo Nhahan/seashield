@@ -37,7 +37,7 @@ constexpr double kWakeMinSpeedCms = 180.0;       // DEADZONE: below this the hul
                                                  // bob/drift doesn't leave a spurious dashed trail on
                                                  // a near-stationary ship (the collar still shows).
 constexpr double kWakeSurfaceLiftCm = 60.0;      // ride just above the sea plane.
-constexpr float kWakeHalfWidthYoungCm = 430.0f;  // ~ship beam at the stern (was 220 = too narrow/thin).
+constexpr float kWakeHalfWidthYoungCm = 800.0f;  // wide turbulent stern churn (was 430 = thin pencil line); ~ship beam x1.1
 constexpr float kWakeHalfWidthOldCm = 2600.0f;   // foam spreads astern.
 // Bow wave: a foam V thrown off the bow, opening back at ~the Kelvin angle.
 constexpr float kBowWaveAngleDeg = 22.0f;        // each wing's sweep back from the bow.
@@ -55,16 +55,19 @@ constexpr float kHullFoamInsetCm = 130.0f;       // band starts inside the edge 
 constexpr float kHullFoamBaseOp = 0.0f;          // OFF: the always-on elliptical ring read as an artificial
                                                  // white halo around the hull. The M_Ocean intersection foam
                                                  // (SceneDepth proximity) now does the waterline wash organically.
-constexpr float kHullFoamSpeedOp = 0.22f;        // only a faint band when actually making way.
+constexpr float kHullFoamSpeedOp = 0.0f;         // OFF too (user-reported): at speed this still drew the SAME
+                                                 // elliptical ring — a 560 cm band OUTSIDE a narrow hull reads as
+                                                 // white "wings" off both flanks. Wake + bow wave carry the
+                                                 // making-way foam; the M_Ocean intersection foam does the waterline.
 // Buoyancy: the visual hull rides the live Gerstner surface (server owns XY/heading).
 constexpr float kBuoyancyTiltDamp = 0.26f;       // a big hull rides the AVERAGE slope, not corks.
 // Hull-waterline spray puffs: small billboard ISM particles emitted where waves slap the hull.
 constexpr double kSprayLifeS = 0.9;              // puff lifetime (seconds) — linger a hair longer to read.
-constexpr int32 kSprayMaxAlive = 280;            // global cap (translucent overdraw budget; tiny billboards).
-constexpr float kSprayYoungHalfM = 0.85f;        // billboard half-size at spawn (metres); EmitSpray jitters it.
+constexpr int32 kSprayMaxAlive = 360;            // global cap (raised for denser mist; tiny lit billboards — watch overdraw).
+constexpr float kSprayYoungHalfM = 0.60f;        // FINER droplets (was 0.85) — smaller + denser overlap into an aerated sheet, not discrete cotton-balls.
 constexpr float kSprayWaveThreshCm = 12.0f;      // wave elevation above mean needed to emit — lowered so even
                                                  // modest chop slapping the hull throws spray (more continuous).
-constexpr float kSprayLapProb = 0.11f;           // always-on lapping trickle: a per-point chance to emit a fine
+constexpr float kSprayLapProb = 0.16f;           // always-on lapping trickle (denser): a per-point chance to emit a fine
                                                  // droplet EVEN below the chop threshold (water never dead-still
                                                  // against a floating hull) — a steady, continuous waterline mist.
 constexpr int32 kSprayEmitPoints = 32;           // points sampled around the hull ellipse per tick (denser).
@@ -875,10 +878,12 @@ void FWakeSystem::RebuildWake(double Now)
 		// Foam opacity: ZERO when stopped (deadzone -> SpeedFrac 0), but once making way it has a
 		// FLOOR so even a slow hull reads as a CLEAN CONTINUOUS wake, not faint dashes catching only
 		// the wave crests (SpeedFrac was ~0.1 at cruise -> near-invisible broken foam). Fades astern.
+		// Bright dense stern core (AgeAlpha~0) that persists astern (slower fade pow 1.2 vs 1.5) — a real
+		// wake's prop-wash churn is the most opaque part right behind the hull, not a faint pencil line.
 		const float Opacity = (P.SpeedFrac <= 0.0f)
 		                          ? 0.0f
-		                          : FMath::Lerp(0.55f, 1.0f, P.SpeedFrac) *
-		                                FMath::Pow(1.0f - AgeAlpha, 1.5f);
+		                          : FMath::Lerp(0.65f, 1.0f, P.SpeedFrac) *
+		                                FMath::Pow(1.0f - AgeAlpha, 1.2f);
 
 		// Pin each edge to the LIVE wave surface (per-vertex: a wide old wake spans
 		// different wave phases) so the foam undulates with the swell, not at mean Z.
@@ -1005,6 +1010,14 @@ void FWakeSystem::RebuildHullFoam(double Now)
 	const float BeamHalf = ShipHalfLenCm * kHullFoamBeamRatio;
 	// Faint always-on foam (the hull displaces the water it floats in) + more making way.
 	const float Op = kHullFoamBaseOp + kHullFoamSpeedOp * LastShipSpeedFrac;
+	if (Op <= 0.0f)
+	{
+		// Both ops are 0: the elliptical collar is disabled (it read as artificial "wings" off the
+		// flanks). Skip building an invisible ribbon — the M_Ocean intersection foam carries the
+		// waterline wash, the wake + bow wave the making-way foam.
+		HullFoamRibbon->ClearMeshSection(0);
+		return;
+	}
 
 	TArray<FVector> Vertices;
 	TArray<int32> Triangles;
@@ -1072,15 +1085,20 @@ void FWakeSystem::EmitSpray(double Now)
 		// Wave elevation above the mean sea surface at this hull point.
 		const float Elev = Surface->SeaSurfaceWorldZ(Edge) - static_cast<float>(SeaWorldFrame::Origin.Z);
 
-		// Bow bias: emit more spray where the hull is cutting through water.
-		const float Bow = FMath::Cos(Ang) > 0.5f ? 2.0f : 1.0f;
+		// Bow bias: the bow cutting the water throws far more spray than amidships/stern.
+		const float CosA = FMath::Cos(Ang);  // +1 at the bow .. -1 at the stern
+		const float Bow = CosA > 0.5f ? 2.4f : (CosA > 0.0f ? 1.3f : 0.8f);
 
-		// Emit on a chop slap (a wave crest against the hull) OR, less often, as an always-on lapping
-		// trickle so the waterline is never dead-still against a floating hull — together they read as
-		// continuous spray/mist rather than the old sparse crest-only bursts.
-		const bool bChop = Elev > kSprayWaveThreshCm && FMath::FRand() < 0.42f * Bow;
+		// THREE emitters so a frigate underway is never "sitting on glass" (the #1 critique): (1) a chop
+		// slap where a wave crest hits the hull, (2) an always-on fine lapping trickle at the waterline,
+		// and (3) — the hero — a SPEED-DRIVEN BOW SHEET: when making way the bow shoulders throw a sheet
+		// of spray regardless of chop. All scale with the bow bias + ship speed, so the waterline lives.
+		const float Spd = LastShipSpeedFrac;  // 0 stopped .. 1 full speed
+		const bool bChop = Elev > kSprayWaveThreshCm && FMath::FRand() < (0.30f + 0.40f * Spd) * Bow;
 		const bool bLap = FMath::FRand() < kSprayLapProb * Bow;
-		if ((bChop || bLap) && Sprays.Num() < kSprayMaxAlive)
+		const bool bBow = CosA > 0.35f && Spd > 0.04f && FMath::FRand() < (0.08f + 0.55f * Spd);
+		const bool bBig = bChop || bBow;  // big fast burst vs fine slow mist
+		if ((bChop || bLap || bBow) && Sprays.Num() < kSprayMaxAlive)
 		{
 			FSpray S;
 			S.SpawnPos = FVector(Edge.X, Edge.Y, Surface->SeaSurfaceWorldZ(Edge) + 30.0f);
@@ -1091,12 +1109,16 @@ void FWakeSystem::EmitSpray(double Now)
 			{
 				R = Side;
 			}
-			// A chop slap throws a bigger, faster burst; a lapping droplet is finer + slower (mist).
-			const float SpeedUp = bChop ? FMath::FRandRange(280.0f, 620.0f) : FMath::FRandRange(150.0f, 320.0f);
-			const float SpeedOut = bChop ? FMath::FRandRange(140.0f, 280.0f) : FMath::FRandRange(70.0f, 150.0f);
-			S.Vel = R * SpeedOut + FVector::UpVector * SpeedUp;
-			const float SizeLo = bChop ? 0.7f : 0.45f;
-			const float SizeHi = bChop ? 1.3f : 0.8f;
+			// A slap / bow sheet throws a bigger, faster burst carried forward off the bow by the ship's
+			// way; a lapping droplet is finer + slower (mist that lingers at the waterline).
+			const float SpeedUp = bBig ? FMath::FRandRange(300.0f, 680.0f) : FMath::FRandRange(150.0f, 320.0f);
+			const float SpeedOut = bBig ? FMath::FRandRange(150.0f, 300.0f) : FMath::FRandRange(70.0f, 150.0f);
+			const float FwdPush = bBow ? FMath::FRandRange(120.0f, 320.0f) * Spd : 0.0f;  // bow sheet carried forward
+			S.Vel = R * SpeedOut + FVector::UpVector * SpeedUp + LastShipFwd * FwdPush;
+			// Wide size spread = the two-layer read: small bright droplet CORES + large soft HAZE puffs
+			// (the lit-volumetric material reads big puffs as the mist veil, small as the bright core).
+			const float SizeLo = bBig ? 0.7f : 0.45f;
+			const float SizeHi = bBig ? 1.7f : 0.9f;
 			S.BaseHalfM = FMath::FRandRange(kSprayYoungHalfM * SizeLo, kSprayYoungHalfM * SizeHi);
 			S.SpawnTime = Now;
 			const int32 Idx = SprayISM->AddInstance(

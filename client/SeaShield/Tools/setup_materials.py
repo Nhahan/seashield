@@ -1303,7 +1303,26 @@ def make_wake():
     m.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
     m.set_editor_property("two_sided", True)
 
-    foam = _const3(m, 0.90, 0.94, 0.96, -700, -120)
+    # Foam colour FROM THE SUN (was a flat near-white that read as chalk): warm bright whitewater
+    # where the low sun grazes the foam, cool blue-grey in shadow/ambient. Real sea foam is never
+    # RGB(1,1,1). Sun-up factor = saturate(sunDir . up) from the atmosphere light direction, so it
+    # tracks time-of-day; biased up so even the low afternoon sun reads as sunlit foam, not grey.
+    sun = _lib.create_material_expression(m, unreal.MaterialExpressionSkyAtmosphereLightDirection, -1150, -300)
+    up = _const3(m, 0.0, 0.0, 1.0, -1150, -180)
+    ndl = _lib.create_material_expression(m, unreal.MaterialExpressionDotProduct, -1000, -260)
+    _lib.connect_material_expressions(sun, "", ndl, "A")
+    _lib.connect_material_expressions(up, "", ndl, "B")
+    nsat = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, -870, -260)
+    _lib.connect_material_expressions(ndl, "", nsat, "")
+    sunbias = _lib.create_material_expression(m, unreal.MaterialExpressionPower, -740, -260)
+    sunbias.set_editor_property("const_exponent", 0.5)   # lift the low-sun factor so foam still reads sunlit
+    _lib.connect_material_expressions(nsat, "", sunbias, "Base")
+    coolfoam = _const3(m, 0.60, 0.70, 0.80, -740, -420)   # shadowed/aerating foam: blue-grey, dimensional
+    warmfoam = _const3(m, 0.97, 0.96, 0.92, -740, -120)   # bright sunlit whitewater
+    foam = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, -560, -260)
+    _lib.connect_material_expressions(coolfoam, "", foam, "A")
+    _lib.connect_material_expressions(warmfoam, "", foam, "B")
+    _lib.connect_material_expressions(sunbias, "", foam, "Alpha")
     _lib.connect_material_property(foam, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
 
     vcolor = _lib.create_material_expression(m, unreal.MaterialExpressionVertexColor, -1000, 120)
@@ -1344,7 +1363,7 @@ def make_wake():
     _lib.connect_material_expressions(n_coarse, "", ncomb, "A")
     _lib.connect_material_expressions(n_fine, "", ncomb, "B")
     noise = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, -280, 700)
-    _lib.connect_material_expressions(_const(m, 0.45, -420, 820), "", noise, "A")   # higher floor: the wake reads as a continuous churn, not sparse dashes
+    _lib.connect_material_expressions(_const(m, 0.34, -420, 820), "", noise, "A")   # lacier holes (was 0.45) — churned whitewater with gaps, still not sparse dashes
     _lib.connect_material_expressions(_const(m, 1.0, -420, 900), "", noise, "B")
     _lib.connect_material_expressions(ncomb, "", noise, "Alpha")
 
@@ -1376,17 +1395,24 @@ def make_spray():
     soft round Fresnel feather * (1-Age); emissive = near-white water colour."""
     m = _new_material("M_Spray")
     m.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
-    m.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
+    # LIT volumetric (the proven M_RocketTrail path, setup_materials make_trail): the puff takes
+    # SUN/SKY light so it BACKLIT-GLOWS toward the sun (rim-lit warm) and goes cool blue-grey in
+    # shadow — the single biggest "expensive look" win for spray (was a flat UNLIT white blob).
+    m.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_DEFAULT_LIT)
+    m.set_editor_property(
+        "translucency_lighting_mode",
+        unreal.TranslucencyLightingMode.TLM_VOLUMETRIC_NON_DIRECTIONAL,
+    )
     m.set_editor_property("two_sided", True)
     m.set_editor_property("used_with_instanced_static_meshes", True)
 
     # Per-instance Age 0..1 from custom-data slot 0 (same as make_rocket_smoke).
     age = _instance_age(m, -1000, 400)
 
-    # White spray colour — slightly blue-tinted aerated water. Eased off pure white so bright edges
-    # don't bloom into hard squares under the cinematic bloom.
-    white = _const3(m, 0.90, 0.93, 0.97, -700, -120)
-    _lib.connect_material_property(white, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    # AERATED-WATER base colour (lit, NOT emissive): slightly cool/off-white so the volumetric
+    # lighting paints it blue-grey in shadow and warm in sun. Real spray is never RGB(1,1,1).
+    base = _const3(m, 0.78, 0.84, 0.92, -700, -120)
+    _lib.connect_material_property(base, "", unreal.MaterialProperty.MP_BASE_COLOR)
 
     # RADIAL UV feather: a camera-facing billboard is flat-on, so Fresnel (≈0 when facing) can't
     # soften it. Fade by distance from the UV centre instead, so the plane reads as a soft round
@@ -1399,9 +1425,29 @@ def make_spray():
     feather.set_editor_property("code", "float f = saturate(1.0 - 1.85 * length(UV - 0.5)); return f * f;")
     _lib.connect_material_expressions(uv, "", feather, "UV")
 
+    # Faint WARM emissive rim where a translucent droplet catches the sun — the backlit halo the
+    # volumetric term alone reads too dim for. Driven by the feather EDGE (1-feather) and kept LOW so
+    # the core stays lighting-driven and doesn't bloom into bright squares.
+    rimedge = _lib.create_material_expression(m, unreal.MaterialExpressionOneMinus, -520, 40)
+    _lib.connect_material_expressions(feather, "", rimedge, "")
+    rimcol = _const3(m, 0.34, 0.31, 0.26, -520, -90)   # warm, low — sun-through-mist glow, not a bloom blob
+    rim = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -380, -10)
+    _lib.connect_material_expressions(rimcol, "", rim, "A")
+    _lib.connect_material_expressions(rimedge, "", rim, "B")
+    _lib.connect_material_property(rim, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+
     # Age fade: (1 - Age) so the puff starts opaque and fully dissolves.
     ageinv = _lib.create_material_expression(m, unreal.MaterialExpressionOneMinus, -700, 400)
     _lib.connect_material_expressions(age, "", ageinv, "")
+
+    # NOISE EROSION -> wispy, aerated, turbulent droplet edges instead of a smooth ball (the
+    # M_RocketTrail wispy-edge trick). Floored to [0.5,1.0] so it ROUGHENS the puff without
+    # fragmenting the small billboard to holes.
+    en = _panned_noise(m, 0.09, (3.0, 2.0, 4.0), 0.0, 1.7, ax=-560, ay=900)
+    erode = _lib.create_material_expression(m, unreal.MaterialExpressionLinearInterpolate, -300, 880)
+    _lib.connect_material_expressions(_const(m, 0.12, -440, 980), "", erode, "A")   # deep wispy holes (was 0.5) -> torn aerated edges, not a round cotton-ball
+    _lib.connect_material_expressions(_const(m, 1.0, -440, 1060), "", erode, "B")
+    _lib.connect_material_expressions(en, "", erode, "Alpha")
 
     # SOFT-PARTICLE depth fade — the real fix for the "white SQUARES". A camera-facing billboard that
     # pokes through the opaque water/hull is hard-clipped along a straight line, leaving a rectangular
@@ -1418,15 +1464,18 @@ def make_spray():
     softfade = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, -460, 600)
     _lib.connect_material_expressions(dscale, "", softfade, "")
 
-    # opacity = feather * (1-Age) * soft-particle fade, then saturate.
+    # opacity = feather * (1-Age) * soft-particle fade * erosion, then saturate.
     o1 = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -360, 280)
     _lib.connect_material_expressions(feather, "", o1, "A")
     _lib.connect_material_expressions(ageinv, "", o1, "B")
     o2 = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -260, 380)
     _lib.connect_material_expressions(o1, "", o2, "A")
     _lib.connect_material_expressions(softfade, "", o2, "B")
+    o3 = _lib.create_material_expression(m, unreal.MaterialExpressionMultiply, -180, 460)
+    _lib.connect_material_expressions(o2, "", o3, "A")
+    _lib.connect_material_expressions(erode, "", o3, "B")
     osat = _lib.create_material_expression(m, unreal.MaterialExpressionSaturate, -120, 320)
-    _lib.connect_material_expressions(o2, "", osat, "")
+    _lib.connect_material_expressions(o3, "", osat, "")
     _lib.connect_material_property(osat, "", unreal.MaterialProperty.MP_OPACITY)
 
     _lib.recompile_material(m)

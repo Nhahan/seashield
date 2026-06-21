@@ -32,6 +32,21 @@ constexpr float kBuoyancyZSpeed = 4.0f;          // FInterpTo speed for the bob 
 constexpr float kBuoyancyTiltSpeed = 2.5f;       // FInterpTo speed for roll/pitch.
 constexpr float kBuoyancyFootprintRadiusCm = 5500.0f;  // ~hull half-length: heave = MEAN over the
                                                        // footprint so sub-hull chop cancels (no cork-bob).
+
+// Asset nose convention. The bpy generators model +Y as the nose (asset_lib.py render notes), but the
+// actor/heading/VFX convention is +X = forward (velocity). Rotate every such mesh -90 deg so its visual
+// nose aligns with the actor's +X. This is the SINGLE SOURCE OF TRUTH for the correction — it MUST be
+// applied to both spawned entities AND the hand-placed own-ship so the two can never silently diverge.
+// (The own-ship missing this was the recurring bug: the hull crabbed 90 deg to its course and the foam
+// ellipse/bow-wave were thrown off the BEAM as white "wings" instead of hugging the hull.)
+constexpr double kAssetNoseYawCorrectionDeg = -90.0;
+void ApplyAssetNoseConvention(UStaticMeshComponent* MeshComp)
+{
+	if (MeshComp != nullptr)
+	{
+		MeshComp->SetRelativeRotation(FRotator(0.0, kAssetNoseYawCorrectionDeg, 0.0));
+	}
+}
 }  // namespace
 
 ASeaWorldManager::ASeaWorldManager()
@@ -149,6 +164,27 @@ void ASeaWorldManager::BeginPlay()
 			if (UPrimitiveComponent* Root = Cast<UPrimitiveComponent>(FrigateActor->GetRootComponent()))
 			{
 				Root->SetMobility(EComponentMobility::Movable);
+			}
+
+			// Apply the +Y-nose -> +X-forward convention to the OWN-SHIP too — the SAME correction every
+			// spawned entity gets (ApplyAssetNoseConvention). The hand-placed frigate was the one mesh
+			// missing it, so the hull crabbed 90 deg to its course and the wake/bow/foam were thrown off
+			// the BEAM as white "wings". Doing it here in code (not only at level authoring) makes it
+			// impossible for the own-ship to silently diverge from every other entity again.
+			if (AStaticMeshActor* FrigateSMA = Cast<AStaticMeshActor>(FrigateActor.Get()))
+			{
+				ApplyAssetNoseConvention(FrigateSMA->GetStaticMeshComponent());
+				// Invariant: the -90 correction assumes the hull's LONG axis is the asset's local +Y. If a
+				// future reimport flips that, every heading/foam alignment goes 90 deg off again — fail loud
+				// in dev (ensure) the instant the level loads, instead of someone re-noticing white wings.
+				if (const UStaticMesh* HullSM = FrigateSMA->GetStaticMeshComponent()->GetStaticMesh())
+				{
+					const FVector LocalExtent = HullSM->GetBoundingBox().GetExtent();
+					ensureMsgf(LocalExtent.Y > LocalExtent.X,
+					           TEXT("SeaShield: SM_Frigate long axis is local X (%.0f) not Y (%.0f) — the -90 deg "
+					                "nose convention is now WRONG; the hull will crab and the foam wing off the beam."),
+					           LocalExtent.X, LocalExtent.Y);
+				}
 			}
 
 			// Forward half-length of the hull (its longest horizontal axis) — the bow
@@ -286,9 +322,8 @@ AActor* ASeaWorldManager::SpawnFor(const FSeaEntityState& Entity)
 	{
 		MeshActor->SetMobility(EComponentMobility::Movable);
 		MeshActor->GetStaticMeshComponent()->SetStaticMesh(Mesh);
-		// The generators model +Y as the nose (asset_lib.py render notes);
-		// the actor convention below points +X along the velocity.
-		MeshActor->GetStaticMeshComponent()->SetRelativeRotation(FRotator(0.0, -90.0, 0.0));
+		// +Y-nose asset -> +X-forward actor convention (shared single source of truth).
+		ApplyAssetNoseConvention(MeshActor->GetStaticMeshComponent());
 	}
 	return MeshActor;
 }
